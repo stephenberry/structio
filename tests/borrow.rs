@@ -11,6 +11,25 @@
 //! allocators give more, Miri gives exactly what was asked for. So every test
 //! here places its document at an address it chose, which is also the only way
 //! to assert the negative cases without waiting for an allocator to disagree.
+//!
+//! # Little-endian only, deliberately
+//!
+//! A borrow reinterprets the document's own bytes as numbers, so it can only
+//! happen where the stored little-endian payload is already in the host's
+//! order. `Reader::borrow_block` says so directly: on a big-endian target it
+//! returns `None` before it looks at the element type, the alignment, or the
+//! category.
+//!
+//! That makes this whole file a little-endian property. The positive cases
+//! cannot hold on big-endian by construction, and -- the reason for gating the
+//! file rather than the eleven of them -- the negative cases would still
+//! *pass* there, having declined for the endianness rather than for the reason
+//! each one exists to pin. A test that passes for the wrong reason is worse
+//! than one that does not run.
+//!
+//! What holds on every target is asserted in `tests/borrow_big_endian.rs`:
+//! the borrow declines, and the copy path still produces the values.
+#![cfg(target_endian = "little")]
 
 use std::borrow::Cow;
 use structio::beve::{self, header};
