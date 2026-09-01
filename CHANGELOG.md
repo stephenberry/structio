@@ -12,6 +12,8 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ### Fixed
 
+- **A wide object compiles.** Past about 64 keys the perfect-hash search almost never succeeds, and it used to spend its whole budget finding that out: seconds of const evaluation per object, and past a certain width `error: constant evaluation is taking a long time`, where the compiler refuses the declaration outright. The search now stops where it stops being productive, and the fallback it was going to reach anyway is reached at once. Objects with distinguishable keys are unaffected at any width.
+- **Building a key map is faster to compile.** The whole-key hash folded the seed in from the first byte, so every seed the search tried re-read every byte of every key. The fold is now seed-independent and computed once per key. About a third off a 40-key object, and more as objects widen. Nothing changes about how a key is looked up at run time or what that costs. The hash itself does change, so a wide object may land on a different scheme than before, in either direction.
 - A declaration that leaves out one of its type's fields is a build error naming the field, rather than a member that quietly stops being written. End a declaration with `..` where the omission is deliberate: `object!(Config { host, port, .. })`, `array!(Rgb [u8; r, g, b, ..])`.
 
 - A declaration that names the same key or variant twice is a compile error even when the type is generic and never read. The check is in the key hash, which only reading used to reach.

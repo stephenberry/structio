@@ -168,6 +168,166 @@ fn realistic_key_sets() {
     }
 }
 
+/// 96 keys sharing a prefix, so no column, no front window and no length class
+/// tells them apart: the shape that reaches the whole-key rung and finds
+/// nothing there.
+const WIDE_UNHASHABLE: &[&str] = &[
+    "commonPrefixField000",
+    "commonPrefixField001",
+    "commonPrefixField002",
+    "commonPrefixField003",
+    "commonPrefixField004",
+    "commonPrefixField005",
+    "commonPrefixField006",
+    "commonPrefixField007",
+    "commonPrefixField008",
+    "commonPrefixField009",
+    "commonPrefixField010",
+    "commonPrefixField011",
+    "commonPrefixField012",
+    "commonPrefixField013",
+    "commonPrefixField014",
+    "commonPrefixField015",
+    "commonPrefixField016",
+    "commonPrefixField017",
+    "commonPrefixField018",
+    "commonPrefixField019",
+    "commonPrefixField020",
+    "commonPrefixField021",
+    "commonPrefixField022",
+    "commonPrefixField023",
+    "commonPrefixField024",
+    "commonPrefixField025",
+    "commonPrefixField026",
+    "commonPrefixField027",
+    "commonPrefixField028",
+    "commonPrefixField029",
+    "commonPrefixField030",
+    "commonPrefixField031",
+    "commonPrefixField032",
+    "commonPrefixField033",
+    "commonPrefixField034",
+    "commonPrefixField035",
+    "commonPrefixField036",
+    "commonPrefixField037",
+    "commonPrefixField038",
+    "commonPrefixField039",
+    "commonPrefixField040",
+    "commonPrefixField041",
+    "commonPrefixField042",
+    "commonPrefixField043",
+    "commonPrefixField044",
+    "commonPrefixField045",
+    "commonPrefixField046",
+    "commonPrefixField047",
+    "commonPrefixField048",
+    "commonPrefixField049",
+    "commonPrefixField050",
+    "commonPrefixField051",
+    "commonPrefixField052",
+    "commonPrefixField053",
+    "commonPrefixField054",
+    "commonPrefixField055",
+    "commonPrefixField056",
+    "commonPrefixField057",
+    "commonPrefixField058",
+    "commonPrefixField059",
+    "commonPrefixField060",
+    "commonPrefixField061",
+    "commonPrefixField062",
+    "commonPrefixField063",
+    "commonPrefixField064",
+    "commonPrefixField065",
+    "commonPrefixField066",
+    "commonPrefixField067",
+    "commonPrefixField068",
+    "commonPrefixField069",
+    "commonPrefixField070",
+    "commonPrefixField071",
+    "commonPrefixField072",
+    "commonPrefixField073",
+    "commonPrefixField074",
+    "commonPrefixField075",
+    "commonPrefixField076",
+    "commonPrefixField077",
+    "commonPrefixField078",
+    "commonPrefixField079",
+    "commonPrefixField080",
+    "commonPrefixField081",
+    "commonPrefixField082",
+    "commonPrefixField083",
+    "commonPrefixField084",
+    "commonPrefixField085",
+    "commonPrefixField086",
+    "commonPrefixField087",
+    "commonPrefixField088",
+    "commonPrefixField089",
+    "commonPrefixField090",
+    "commonPrefixField091",
+    "commonPrefixField092",
+    "commonPrefixField093",
+    "commonPrefixField094",
+    "commonPrefixField095",
+];
+
+/// A wide object has to *build*, not merely fall back.
+///
+/// A `const`, so it is the const evaluator that runs it, and that is the point:
+/// searching for a whole-key seed here used to spend the entire budget before
+/// reaching the fallback it was always going to reach. Enough objects this
+/// shape in one crate and rustc stops with `error: constant evaluation is
+/// taking a long time` rather than merely taking it, so a schema this wide
+/// could not be compiled at all.
+const _WIDE_OBJECT_COMPILES: &KeyMap = &KeyMap::build(WIDE_UNHASHABLE);
+
+/// `KeyMap::build` takes `&'static str` in practice, so a generated key set is
+/// leaked rather than contorting the API. One allocation that outlives the
+/// test.
+fn leaked(names: impl IntoIterator<Item = String>) -> &'static [&'static str] {
+    let v: Vec<&'static str> = names
+        .into_iter()
+        .map(|s| &*Box::leak(s.into_boxed_str()))
+        .collect();
+    Vec::leak(v)
+}
+
+/// The seed search is not attempted past `MAX_SEARCHED_KEYS`, but only for the
+/// whole-key scheme, which is the one rung no cheap predicate guards. A wide
+/// object whose keys have distinct front bytes still gets a hash, and gets it
+/// in a handful of attempts.
+#[test]
+fn a_wide_object_with_distinct_front_bytes_still_gets_a_hash() {
+    let keys = leaked((0..96).map(|i| format!("f{i:03}")));
+    assert_eq!(assert_exact(keys), HashKind::FrontHash4);
+    assert_rejects(keys, &["f096", "f9999", "", "g000"]);
+}
+
+/// And one the ladder cannot index reads correctly under the fallback, at a
+/// width no other test reaches. Which scheme it lands on is not what changed
+/// here: it reached `Linear` before too, just slowly.
+#[test]
+fn a_wide_object_that_cannot_be_hashed_stays_exact_under_linear() {
+    let keys: &'static [&'static str] = WIDE_UNHASHABLE;
+    assert_eq!(assert_exact(keys), HashKind::Linear);
+    assert_rejects(
+        keys,
+        &["commonPrefixField096", "commonPrefixField", "", "other"],
+    );
+}
+
+/// The whole-key rung, pinned. It is the one this crate's hashing rewrote, and
+/// the generated sets reach it only by chance, a few times in four hundred, so
+/// a mismatch between what the search computes and what the parser computes
+/// would surface as a flake rather than as a failure. These four keys leave it
+/// no alternative: same length, no distinguishing column, no distinct front
+/// eight bytes.
+#[test]
+fn the_whole_key_scheme_is_exact() {
+    let keys: &[&'static str] = &["aaaaaaaaaa", "aaaaaaaaab", "aaaaaaaaba", "aaaaaaaabb"];
+    assert_eq!(assert_exact(keys), HashKind::FullFlat);
+    assert_rejects(keys, &["aaaaaaaaaa2", "aaaaaaaa", "", "baaaaaaaaa"]);
+}
+
 /// Wide objects, where the seed search has the least room and the fallback
 /// matters most.
 #[test]
@@ -216,15 +376,7 @@ fn generated_key_sets_are_all_exact() {
                 owned.push(s);
             }
         }
-        // `KeyMap::build` takes `&'static str` in practice; leaking here keeps
-        // the test honest about the lifetime without contorting the API.
-        let keys: &'static [&'static str] = Box::leak(
-            owned
-                .iter()
-                .map(|s| &*Box::leak(s.clone().into_boxed_str()))
-                .collect::<Vec<&'static str>>()
-                .into_boxed_slice(),
-        );
+        let keys = leaked(owned.iter().cloned());
 
         let map = KeyMap::build(keys);
         for (i, k) in keys.iter().enumerate() {

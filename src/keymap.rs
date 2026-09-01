@@ -31,8 +31,8 @@ use crate::swar::load_u64;
 ///
 /// This is the hard ceiling, not the practical one: with a fixed 256-slot
 /// bucket table, random key sets stop finding a perfect hash somewhere around
-/// 64 to 80 fields and fall back before ever reaching this bound. Regular field
-/// names fare much better.
+/// 64 to 80 fields, which is why the whole-key search is not attempted past a
+/// width of its own. Regular field names fare much better.
 pub const MAX_HASHED_KEYS: usize = 255;
 
 /// Slots in the bucket table. Fixed so that `KeyMap` is a single concrete type
@@ -148,13 +148,26 @@ pub(crate) const fn to_u64_at(data: &[u8], off: usize) -> u64 {
         | ((data[off + 7] as u64) << 56)
 }
 
-/// Hash of a whole key. `min_len`/`max_len` let the caller specialize away the
-/// short/long branches; this const version keeps them dynamic.
-pub(crate) const fn full_hash(data: &[u8], n: usize, seed: u64) -> u64 {
+/// Basis for [`key_digest`]. Odd is the requirement: it is the multiplier in
+/// the first [`bitmix`], and multiplication by an odd constant is a bijection,
+/// so no part of a chunk is lost. This is the golden-ratio one
+/// [`seed_at`] already uses.
+const DIGEST_BASIS: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// The seed-independent fold of a whole key.
+///
+/// Split out of [`full_hash`] so the perfect-hash search can fold each key once
+/// rather than once per key *per seed*. The seed used to enter at the first
+/// chunk, which made every attempt re-read every byte of every key.
+///
+/// Every other scheme in the ladder already had this shape: its hash is
+/// `bitmix(something(key), seed)`, with the seed touching only the last step.
+/// This gives the whole-key scheme the same shape.
+const fn key_digest(data: &[u8], n: usize) -> u64 {
     if n < 8 {
-        return bitmix(to_u64_below_8(data, n), seed);
+        return to_u64_below_8(data, n);
     }
-    let mut h = seed;
+    let mut h = DIGEST_BASIS;
     let mut i = 0;
     // Consume whole 8-byte chunks, then re-read the final 8 bytes as the tail.
     // Overlapping the tail costs nothing and avoids a partial-load branch.
@@ -163,6 +176,13 @@ pub(crate) const fn full_hash(data: &[u8], n: usize, seed: u64) -> u64 {
         i += 8;
     }
     rich_bitmix(to_u64_at(data, n - 8), h)
+}
+
+/// Hash of a whole key: the fold, then the seed. Both the search and the
+/// parser go through here, which is what keeps the table and the lookup
+/// computing the same value.
+pub(crate) const fn full_hash(data: &[u8], n: usize, seed: u64) -> u64 {
+    bitmix(key_digest(data, n), seed)
 }
 
 /// Deterministic seed sequence for the perfect-hash search. SplitMix64, which
@@ -174,9 +194,42 @@ const fn seed_at(i: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// How many seeds to try before giving up on a scheme. Each attempt is O(n),
-/// so this stays well inside the const evaluator's step budget.
+/// How many seeds to try before giving up on a scheme.
+///
+/// Typically nowhere near reached: the median is 5 attempts at 32 keys, 16 at
+/// 40, 77 at 48. The tail is another matter, and is the reason for the number.
+/// At 56 keys, where every key set measured still resolves, one needed 3573.
+/// So lowering this would not save the common case anything and would cost the
+/// wide-but-solvable case its hash. What keeps the *futile* case from costing
+/// seconds is [`MAX_SEARCHED_KEYS`], not a smaller ceiling here.
 const SEED_ATTEMPTS: u64 = 4096;
+
+/// Widest object the whole-key search, [`HashKind::FullFlat`], is attempted
+/// for.
+///
+/// The bucket table is a fixed 256 slots, so the birthday bound turns against a
+/// perfect hash as the key count climbs. Measured over random key sets: every
+/// one resolves at 56 keys, roughly nine in ten at 60, half at 64, one in five
+/// at 68, one in fourteen at 72, and it keeps thinning from there rather than
+/// stopping. A search that is going to fail still spends the whole of
+/// [`SEED_ATTEMPTS`] finding out, seconds of const evaluation per object, and
+/// enough such objects in one crate reach `long_running_const_eval`, where
+/// rustc refuses the build rather than merely taking its time.
+///
+/// **This is a trade, not a free win.** Because the odds thin rather than stop,
+/// a low single-digit percentage of objects between 73 and about 83 keys lose a
+/// hash they would otherwise have found, and read through
+/// [`HashKind::Linear`] instead. What they buy is that every object at those
+/// widths, the other ninety-odd percent included, compiles at once instead of
+/// spending its budget to reach the same fallback, and that a crate full of
+/// them still builds.
+///
+/// It gates this one rung and not the ladder: every scheme above either needs
+/// no search at all or is guarded by a predicate that declines the key sets it
+/// cannot index, so a wide object whose keys do have a distinguishing column or
+/// distinct front bytes still gets a hash, and gets it in a handful of
+/// attempts.
+const MAX_SEARCHED_KEYS: usize = 72;
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -373,7 +426,13 @@ impl KeyMap {
         }
 
         // --- 8. hash the whole key --------------------------------------------
-        if let Some((seed, table)) = search_seed(keys, slots, SearchMode::Full, 0, &empty_per_len) {
+        //
+        // The one rung no cheap predicate guards, hence the width test. See
+        // `MAX_SEARCHED_KEYS`.
+        if n <= MAX_SEARCHED_KEYS
+            && let Some((seed, table)) =
+                search_seed(keys, slots, SearchMode::Full, 0, &empty_per_len)
+        {
             m.kind = HashKind::FullFlat;
             m.seed = seed;
             m.table = table;
@@ -616,23 +675,45 @@ enum SearchMode {
     Full,
 }
 
-const fn search_hash(
+/// The part of a key's hash that does not depend on the seed.
+///
+/// One per key per search, rather than one per key per attempt. What comes out
+/// is exactly what each scheme's lookup feeds to its final mix, so the search
+/// and the parser still compute the same hash.
+const fn search_preimage(
     key: &[u8],
-    seed: u64,
     mode: SearchMode,
     uidx: usize,
     per_len: &[u8; SLOT_CAP],
 ) -> u64 {
     match mode {
-        SearchMode::Front2 => bitmix(to_u64_below_8(key, 2), seed),
-        SearchMode::Front4 => bitmix(to_u64_below_8(key, 4), seed),
-        SearchMode::Front8 => rich_bitmix(to_u64_below_8(key, 8), seed),
-        SearchMode::Sized => bitmix((key[uidx] as u64) | ((key.len() as u64) << 8), seed),
+        SearchMode::Front2 => to_u64_below_8(key, 2),
+        SearchMode::Front4 => to_u64_below_8(key, 4),
+        SearchMode::Front8 => to_u64_below_8(key, 8),
+        SearchMode::Sized => (key[uidx] as u64) | ((key.len() as u64) << 8),
         SearchMode::PerLength => {
             let col = per_len[key.len()] as usize;
-            bitmix((key[col] as u64) | ((key.len() as u64) << 8), seed)
+            (key[col] as u64) | ((key.len() as u64) << 8)
         }
-        SearchMode::Full => full_hash(key, key.len(), seed),
+        SearchMode::Full => key_digest(key, key.len()),
+    }
+}
+
+/// The seed-dependent step, which is all an attempt has left to do.
+///
+/// Spelled out rather than given a catch-all arm. A mode added later whose
+/// lookup mixes with [`rich_bitmix`] would otherwise default to [`bitmix`]
+/// here, and the search would build a table the parser cannot read: not a
+/// wrong field, since the candidate is confirmed by comparison, but a field
+/// that can never be found. Exhaustive, the compiler asks.
+const fn mix_preimage(pre: u64, seed: u64, mode: SearchMode) -> u64 {
+    match mode {
+        SearchMode::Front8 => rich_bitmix(pre, seed),
+        SearchMode::Front2
+        | SearchMode::Front4
+        | SearchMode::Sized
+        | SearchMode::PerLength
+        | SearchMode::Full => bitmix(pre, seed),
     }
 }
 
@@ -650,6 +731,16 @@ const fn search_seed(
 ) -> Option<(u64, [u8; SLOT_CAP])> {
     let n = keys.len();
     let mask = (slots - 1) as u64;
+
+    // Fold every key once. Indexed by key rather than by slot, hence the bound
+    // `build` already established.
+    let mut pre = [0u64; MAX_HASHED_KEYS];
+    let mut i = 0;
+    while i < n {
+        pre[i] = search_preimage(keys[i].as_bytes(), mode, uidx, per_len);
+        i += 1;
+    }
+
     let mut attempt = 0u64;
     while attempt < SEED_ATTEMPTS {
         let seed = seed_at(attempt);
@@ -662,7 +753,7 @@ const fn search_seed(
         let mut ok = true;
         let mut i = 0;
         while i < n {
-            let h = search_hash(keys[i].as_bytes(), seed, mode, uidx, per_len) & mask;
+            let h = mix_preimage(pre[i], seed, mode) & mask;
             if table[h as usize] != n as u8 {
                 ok = false;
                 break;
