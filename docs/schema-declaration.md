@@ -121,7 +121,7 @@ Three details are worth pointing out, because they are not arbitrary.
 
 `match_key` is what makes the perfect hash safe. `index` comes from a hash, so it is only a *candidate*; an unknown key can collide with an occupied bucket. Confirming it here, where the key is a literal and `key.len()` is therefore a constant, means the comparison inlines to a fixed-size compare rather than a call to `memcmp`. Returning `false` rather than an error lets the caller treat the member as unknown, which under the default is an `UnknownKey` and under [`SkipUnknown`](options.md#error_on_unknown_keys) is a member stepped over. Either way the decision is the caller's, not this function's.
 
-Each member writes an unconditional trailing comma, and the caller overwrites the last one with `}`. No field has to ask whether it is first. The `"key":` prefix is assembled by `concat!` at compile time, so writing a member is one copy of a constant string.
+Each member writes an unconditional trailing comma, and the caller overwrites the last one with `}`. No field has to ask whether it is first. The `"key":` prefix is assembled at compile time, so writing a member is one copy of a constant string.
 
 `#[inline]`, not `#[inline(always)]`. `read_field` holds the parser for every field, so forcing it inline duplicates a whole nested struct's parser into each field arm of its parent, recursively. Getting this wrong cost a factor of two to three on the benchmark; see [design.md](design.md).
 
@@ -138,7 +138,7 @@ The `let mut i = 0; if index == i { .. } i += 1;` chain is not a stylistic choic
 ### Cons
 
 - **Field names are written twice** (once in the struct, once in the `object!` call). They can drift. A field added to the struct and forgotten in `object!` compiles fine and is silently absent from the output, in every format. This is the single real cost of this approach.
-- **Attribute syntax is clunkier.** A per-field option is either positional (`"key" => field`) or a bare marker (`#[required] field`) rather than an argument list like `#[json(rename = "key")]`. A `macro_rules!` matcher can carry a marker and reject a misspelled one, but it cannot parse an arbitrary attribute grammar, so every option has to earn its own place in the field syntax.
+- **Attribute syntax is clunkier.** A per-field option is either positional (`"key" => field`) or a bare marker (`#[required] field`) rather than an argument list like `#[json(rename = "key")]`. A `macro_rules!` matcher can carry a marker and reject a misspelled one, but it cannot parse an arbitrary attribute grammar, so every option has to earn its own place in the field syntax. A *container*-level option has more room: `as "camelCase"` sits in the header, where it costs one extra arm per generics form and nothing at all at a field.
 - **Generics need explicit bound restatement** in the macro call, as shown above.
 - **Poorer error messages.** A type error inside a macro expansion points at the macro invocation, not the offending field.
 

@@ -27,7 +27,7 @@ pub use traits::{
     Read, ReadArray, ReadAs, ReadEnum, ReadKeyAs, ReadObject, ReadWrite, Write, WriteArray,
     WriteAs, WriteKeyAs, WriteObject,
 };
-pub use writer::Writer;
+pub use writer::{Writer, quoted_key};
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::options::{Options, Standard};

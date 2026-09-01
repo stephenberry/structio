@@ -175,7 +175,7 @@ No comparison against `serde_json` has been run, so please do not infer one.
 
 **Few options.** [`Options`](docs/options.md) covers indentation, keeping an array on the line it began on, leaving null members out, refusing a key nothing claims, requiring every key the schema declares, and reading JSONC comments, which is where Glaze's `glz::opts` starts. Requiring *some* of the keys is a property of the schema rather than a policy: mark those fields [`#[required]`](docs/schemas.md#required-fields).
 
-**Few `serde` attributes.** Keys can be renamed, fields can be marked [`#[required]`](docs/schemas.md#required-fields), null members can be skipped, and that is the extent of it. There is no `flatten`, no enum tagging strategy, no case conversion.
+**Few `serde` attributes.** Keys can be renamed one at a time or by a [case rule](docs/schemas.md#case-rules), fields can be marked [`#[required]`](docs/schemas.md#required-fields), null members can be skipped, and that is the extent of it. There is no `flatten` and no enum tagging strategy.
 
 **Foreign types need an adapter or a wrapper.** Rust's orphan rule means you cannot describe a type from another crate the way you can specialize `glz::meta` for any C++ type. A field can name an [adapter](docs/schemas.md#types-you-do-not-own) that says how its type is read and written, which keeps the type out of your API; a newtype is still the answer when the foreign type has no `Default`, or when it appears in many structs.
 

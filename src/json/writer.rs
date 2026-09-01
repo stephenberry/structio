@@ -21,6 +21,36 @@ use crate::swar::{escape_mask, first_match, load_u64, needs_escape};
 /// How much a sink-backed writer buffers before draining.
 pub const DEFAULT_SINK_BUFFER: usize = 8 * 1024;
 
+/// The complete `"KEY":` prefix of a JSON member.
+///
+/// `N` must be the key's length plus the three punctuation bytes; the macro
+/// derives it from exactly that. The JSON counterpart of
+/// [`beve::header::encode_key`](crate::beve::header::encode_key), and needed
+/// for the same reason: assembling the prefix at compile time makes writing a
+/// member one copy of one constant.
+///
+/// A declaration that spells its key out gets this prefix from `concat!`
+/// instead, which cannot be given a computed string. This is the path a
+/// [case rule](crate::case) takes, and the key it is handed comes from a Rust
+/// identifier, so there is nothing in it for JSON to escape.
+pub const fn quoted_key<const N: usize>(key: &str) -> [u8; N] {
+    let bytes = key.as_bytes();
+    assert!(
+        N == bytes.len() + 3,
+        "structio: `quoted_key` was given a length that is not the key's plus its punctuation"
+    );
+    let mut out = [0u8; N];
+    out[0] = b'"';
+    let mut i = 0;
+    while i < bytes.len() {
+        out[1 + i] = bytes[i];
+        i += 1;
+    }
+    out[N - 2] = b'"';
+    out[N - 1] = b':';
+    out
+}
+
 /// Accumulates JSON output.
 ///
 /// The lifetime is the borrow of an [`io::Write`] sink, and is `'static` for

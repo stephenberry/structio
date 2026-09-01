@@ -35,6 +35,70 @@ The key is a string literal, so it can hold anything the format can carry, inclu
 
 Field order in the declaration is the order members are **written**. Reading does not care about order.
 
+### Case rules
+
+A schema whose keys differ from the Rust names by a *rule* rather than one at a time names the rule once, after the type. Every key the declaration does not spell out is then converted during compilation. `object!`, `unit_enum!` and `tagged_enum!` take one, as do their `json_` and `beve_` variants:
+
+```rust
+structio::object!(Camera as "camelCase" {
+    field_of_view,
+    near_plane,
+    "sensorID" => sensor_id,
+});
+```
+
+That writes `{"fieldOfView":..,"nearPlane":..,"sensorID":..}`. The eight rules spell themselves the way `serde`'s `rename_all` does, though they do not always mean the same thing by it -- see [coming from serde](#coming-from-serde) below:
+
+| Rule | `http_byte_offset` becomes |
+|---|---|
+| `"lowercase"` | `httpbyteoffset` |
+| `"UPPERCASE"` | `HTTPBYTEOFFSET` |
+| `"PascalCase"` | `HttpByteOffset` |
+| `"camelCase"` | `httpByteOffset` |
+| `"snake_case"` | `http_byte_offset` |
+| `"SCREAMING_SNAKE_CASE"` | `HTTP_BYTE_OFFSET` |
+| `"kebab-case"` | `http-byte-offset` |
+| `"SCREAMING-KEBAB-CASE"` | `HTTP-BYTE-OFFSET` |
+
+An explicit key wins over the rule wherever both appear, as `"sensorID"` does above. Knowing when to reach for that override means knowing the rule, which is defined over **words** rather than over underscores:
+
+- One or more `_` separate words and are never emitted.
+- A capital after a lower-case letter or a digit begins a word, so `byteOffset` splits as `byte` + `Offset` and `vec3_x` as `vec3` + `x`.
+- Inside a run of capitals only the last begins a word, and only when a lower-case letter follows it, so `HTTPUrl` splits as `HTTP` + `Url` rather than at every capital.
+- A byte above ASCII has no case to change and passes through, and it begins no word of its own, but it does end one: `caféBar` splits as `café` + `Bar` so the `B` keeps its case.
+
+Two consequences are worth stating outright, because they are the ones that surprise people.
+
+**A leading or trailing `_` is dropped.** In Rust those are the "unused" marker and the keyword escape, and neither is part of the name the wire knows: `type_` converts to `type`, `_scratch` to `scratch`.
+
+**A run of capitals loses its capitals.** `http_url` under `"camelCase"` is `httpUrl`, not `httpURL`, because whole words are respelled. A format that wants the acronym back asks for it with `"httpURL" => http_url`.
+
+A raw identifier is the one name a rule cannot help with. `stringify!(r#type)` is `"r#type"`, so that is the key with or without a rule, and a rule respells the `r#` along with the rest. Give such a field an explicit key.
+
+Reading a name as words rather than as a snake_case string is what lets one rule serve a variant name too, since those arrive already capitalized:
+
+```rust
+structio::unit_enum!(Mode as "kebab-case" { ReadOnly, ReadWrite, HTTPProxy });
+```
+
+writes `"read-only"`, `"read-write"` and `"http-proxy"`.
+
+Two names whose converted keys collide are a compile error, from the duplicate check the key hash already performs. `type_` beside `_type` under one rule does not build, rather than silently leaving one of them unreachable.
+
+#### Coming from serde
+
+The spellings are serde's so the vocabulary is familiar. The rule is not serde's, and three differences change what goes on the wire:
+
+- **`"lowercase"` and `"UPPERCASE"` keep serde's underscores and these do not.** Serde's field rules take the name to be snake_case already, so `lowercase` is the identity and `UPPERCASE` is `to_ascii_uppercase`: `byte_offset` stays `byte_offset`, or becomes `BYTE_OFFSET`. Here they mean what they say: `byteoffset` and `BYTEOFFSET`.
+- **Acronyms in a variant name.** Serde's variant rules break at every capital, so `HTTPProxy` under `"snake_case"` is `h_t_t_p_proxy`. Here it is `http_proxy`.
+- **Serde has two rules and this has one.** Which of serde's applies depends on whether the name is a field or a variant, so a field that is not snake_case, or a variant that is not PascalCase, is converted by a rule that was not written for it. One rule over words has no such seam.
+
+The other six rules land on the string serde lands on, for a snake_case field and an acronym-free PascalCase variant.
+
+#### What a rule costs
+
+A rule costs nothing at run time. It is a rewrite of a string during const evaluation, and the converted key ends up the same constant in read-only memory a spelled-out one would: a declaration with a rule and the same declaration with every key written out produce identical bytes in both formats. [`array!`](#positional-structs) takes no rule, since a positional struct writes no keys for one to convert.
+
 ### Required fields
 
 A member the document has to carry is marked `#[required]`. Absence is otherwise no error, so an unmarked field the document leaves out keeps whatever the destination already held.

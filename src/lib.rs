@@ -280,6 +280,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod beve;
+pub mod case;
 pub mod error;
 pub mod ext;
 pub mod json;

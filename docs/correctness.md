@@ -24,6 +24,8 @@ Every one of the 4,278,190,078 finite non-zero values round-trips, and no decima
 
 Both formats share one table but reach it through different entry points, since JSON has to find where a key ends and BEVE is told. Those two are asserted to resolve every key of every generated set to the same index, which is what guards against them drifting apart.
 
+**A case rule is checked against the keys it stands for.** The perfect hash, the JSON member prefix and the BEVE key encoding are three separate compile-time constants, so a rule that reached some of them and not the others would produce a type that reads back something it never wrote. The check is byte identity in both formats between a declaration that names a rule and the same declaration with every key written out. On top of that, each of the eight rules is pinned against one name, and the word splitting is checked over the shapes it has an opinion about: a digit boundary, a run of capitals, the keyword escape, and the unused marker.
+
 **A `#[required]` field's bit is the same index**, so the mask is checked against what the readers actually set rather than only against the declaration: one case per marked field in each format, from documents that carry every other member. The case worth the trouble is the wide struct. A mark needs a bit only for itself, so a struct of more than 64 fields may still have one, and the field past the 64th is where an implementation would go wrong quietly -- a shift by 64 wraps to bit 0 on most machines, which would credit a marked field for a member that is not there. A 70-field struct is read from a document holding only its 65th member and required to refuse it, in both formats.
 
 ## Round-tripping

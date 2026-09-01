@@ -345,6 +345,10 @@ pub const fn key_len(key: &str) -> usize {
 /// pre-quoted `"key":` prefix.
 pub const fn encode_key<const N: usize>(key: &str) -> [u8; N] {
     let bytes = key.as_bytes();
+    assert!(
+        N == key_len(key),
+        "structio: `encode_key` was given a length that is not the key's `key_len`"
+    );
     let mut out = [0u8; N];
     let mut head = [0u8; 8];
     let used = encode_size(bytes.len() as u64, &mut head);

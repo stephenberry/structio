@@ -112,7 +112,7 @@ Floats parse in three tiers: an exact path (mantissa at most 2^53, small exponen
 
 ## The writer
 
-Members are written with an **unconditional trailing comma**, and the last one is overwritten with `}`. That removes the per-field "am I first" branch from the inner loop entirely. Each member's `"key":` prefix is assembled by `concat!` at compile time, so writing one is a copy of a constant string.
+Members are written with an **unconditional trailing comma**, and the last one is overwritten with `}`. That removes the per-field "am I first" branch from the inner loop entirely. Each member's `"key":` prefix is assembled during const evaluation, so writing one is a copy of a constant string.
 
 Under [`Options::PRETTY`](options.md) the comma is dropped rather than overwritten, so the closing bracket can go on its own line, and an empty container never wrote one and stays as `{}`. An array kept inline by `NEW_LINES_IN_ARRAYS` takes the overwrite instead, having no line to go to. The whole of that sits behind a constant, so a compact writer emits none of it and never touches the depth it would have read.
 
@@ -241,7 +241,11 @@ const N: usize = key_len(KEY);
 const ENCODED: [u8; N] = encode_key::<N>(KEY);
 ```
 
-Writing a member is then one copy of one constant array, which is the same trick the JSON side plays with `concat!("\"", key, "\":")`.
+Writing a member is then one copy of one constant array, and the JSON side assembles its `"key":` prefix the same way, from `quoted_key::<N>`.
+
+A [case rule](schemas.md#case-rules) is the same machinery pointed at the key itself. `macro_rules!` cannot manipulate a string, but a `const fn` can, and everything downstream already takes a computed key: the key list is an ordinary const expression and the perfect hash is built from it during const evaluation. So a rule adds a step in front of the two encodings rather than a second path through them, and a converted key is the same constant in read-only memory a written-out one is. Put both declarations in one crate and their writers come out as a single symbol, LLVM's function merging having found nothing to tell apart.
+
+The JSON half needed the one change. Its prefix used to come from `concat!`, which takes literals and nothing else and so cannot assemble a key that exists only once a `const fn` has run. Rather than keep two paths, the prefix is now a *function of* the key macro rather than a second copy of the literal-or-name-or-rule choice, which is what makes it impossible for a member to be written under one spelling and confirmed under another. The constant it lands on is the same one `concat!` produced.
 
 ### Measuring is the writer with its stores removed
 

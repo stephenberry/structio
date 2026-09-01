@@ -63,6 +63,14 @@ structio::tagged_enum!(Event {
 });
 ```
 
+Both macros also take a [case rule](schemas.md#case-rules) after the type, which renames every variant the declaration does not spell out. The rule splits a name into words, and a Rust variant is spelled with capitals rather than underscores, so that is where it splits:
+
+```rust
+structio::unit_enum!(Mode as "kebab-case" { ReadOnly, ReadWrite, HTTPProxy });
+```
+
+writes `"read-only"`, `"read-write"` and `"http-proxy"`.
+
 ### Generics and borrowing
 
 Both macros take a generics list in brackets, exactly as `object!` does:

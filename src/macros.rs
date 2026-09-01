@@ -39,6 +39,40 @@
 /// });
 /// ```
 ///
+/// A declaration whose keys differ from the Rust names by a rule rather than
+/// one at a time names the rule once, after the type. Every key it does not
+/// spell out is then converted during compilation.
+///
+/// ```
+/// # use structio::to_string;
+/// #[derive(Default)]
+/// struct Camera { field_of_view: f32, near_plane: f32, sensor_id: u32 }
+///
+/// structio::object!(Camera as "camelCase" {
+///     field_of_view,
+///     near_plane,
+///     "sensorID" => sensor_id,
+/// });
+///
+/// assert_eq!(
+///     to_string(&Camera::default()),
+///     r#"{"fieldOfView":0,"nearPlane":0,"sensorID":0}"#,
+/// );
+/// ```
+///
+/// The rules are `"lowercase"`, `"UPPERCASE"`, `"PascalCase"`, `"camelCase"`,
+/// `"snake_case"`, `"SCREAMING_SNAKE_CASE"`, `"kebab-case"` and
+/// `"SCREAMING-KEBAB-CASE"`. An explicit key wins over the rule wherever both
+/// are present, which is what makes `"sensorID" => sensor_id` above the escape
+/// hatch for a name the rule spells differently than the format does.
+///
+/// [`case`](crate::case) has the rule in full. Two parts of it are worth
+/// knowing before reaching for one: a leading or trailing `_` is dropped, so
+/// `type_` converts to `type`, and a run of capitals is respelled as one word,
+/// so `http_url` under `"camelCase"` is `httpUrl` rather than `httpURL`. The
+/// spellings are `serde`'s but the rule is not, so a schema being ported
+/// should check [the differences](crate::case#coming-from-serde) first.
+///
 /// A member a document has to carry is marked `#[required]`. Absence is
 /// otherwise no error: an unmarked field the document leaves out keeps
 /// whatever the destination already held.
@@ -206,25 +240,47 @@ macro_rules! beve_object {
 /// declare one they do not constrain. Stating that once is the point.
 ///
 /// The two lists handed on are the read generics and the write generics, in
-/// that order.
+/// that order, and behind them the declaration's [case rule](crate::case) or
+/// `_` for none.
+///
+/// Each generics form needs two arms, since `macro_rules!` cannot make `as
+/// "camelCase"` optional in front of a `$ty:ty`. They differ only in what they
+/// put in the case slot, so all six hand the normalized form to one place.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __declare {
     // Generics that already declare `'de`: the type borrows from the input, so
     // both impls use the list verbatim.
+    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
+        $crate::__declared!($m ['de $($gen)*] ['de $($gen)*] [$case] $ty { $($body)* });
+    };
     ($m:ident [ 'de $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
-        $crate::__keys_impl!(['de $($gen)*] $ty { $($body)* });
-        $crate::$m!(['de $($gen)*] ['de $($gen)*] $ty { $($body)* });
+        $crate::__declared!($m ['de $($gen)*] ['de $($gen)*] [_] $ty { $($body)* });
     };
     // Generics without `'de`: the read impls need it, the write impls must not
     // declare an unconstrained lifetime.
+    ($m:ident [ $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
+        $crate::__declared!($m ['de, $($gen)*] [$($gen)*] [$case] $ty { $($body)* });
+    };
     ($m:ident [ $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
-        $crate::__keys_impl!([$($gen)*] $ty { $($body)* });
-        $crate::$m!(['de, $($gen)*] [$($gen)*] $ty { $($body)* });
+        $crate::__declared!($m ['de, $($gen)*] [$($gen)*] [_] $ty { $($body)* });
+    };
+    ($m:ident $ty:ty as $case:tt { $($body:tt)* }) => {
+        $crate::__declared!($m ['de] [] [$case] $ty { $($body)* });
     };
     ($m:ident $ty:ty { $($body:tt)* }) => {
-        $crate::__keys_impl!([] $ty { $($body)* });
-        $crate::$m!(['de] [] $ty { $($body)* });
+        $crate::__declared!($m ['de] [] [_] $ty { $($body)* });
+    };
+}
+
+/// A declaration whose generics and case rule are both in normal form.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __declared {
+    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty { $($body:tt)* }) => {
+        $crate::__case_check!($case);
+        $crate::__keys_impl!([$($wgen)*] [$case] $ty { $($body)* });
+        $crate::$m!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
     };
 }
 
@@ -232,9 +288,9 @@ macro_rules! __declare {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __both_impls {
-    ([$($rgen:tt)*] [$($wgen:tt)*] $ty:ty { $($body:tt)* }) => {
-        $crate::__json_impls!([$($rgen)*] [$($wgen)*] $ty { $($body)* });
-        $crate::__beve_impls!([$($rgen)*] [$($wgen)*] $ty { $($body)* });
+    ([$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty { $($body:tt)* }) => {
+        $crate::__json_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
+        $crate::__beve_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
     };
 }
 
@@ -295,7 +351,7 @@ macro_rules! __is_required {
 #[macro_export]
 macro_rules! __keys_impl {
     (
-        [$($wgen:tt)*] $ty:ty {
+        [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
         }
     ) => {
@@ -303,7 +359,7 @@ macro_rules! __keys_impl {
 
         impl<$($wgen)*> $crate::Keys for $ty {
             const KEYS: &'static [&'static str] = &[
-                $( $crate::__json_key!($($key)? [$field]) ),*
+                $( $crate::__json_key!([$case] $($key)? [$field]) ),*
             ];
             // Built from `Self::KEYS` rather than a second copy of the key
             // list, so the two cannot drift apart.
@@ -345,7 +401,7 @@ macro_rules! __keys_impl {
 #[macro_export]
 macro_rules! __json_impls {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty {
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
         }
     ) => {
@@ -369,7 +425,7 @@ macro_rules! __json_impls {
                     if index == i {
                         // The hash only proposed this field; confirm the key
                         // before touching the value.
-                        if !p.match_key($crate::__json_key!($($key)? [$field])) {
+                        if !p.match_key($crate::__json_key!([$case] $($key)? [$field])) {
                             return ::core::result::Result::Ok(false);
                         }
                         p.colon()?;
@@ -388,11 +444,21 @@ macro_rules! __json_impls {
                 &self,
                 w: &mut $crate::json::Writer<'_, O>,
             ) {
+                // The duplicate-key check is in `KeyMap::build`, which nothing
+                // reaches but `Keys::MAP`. Reading looks a key up and so
+                // evaluates it; writing has no use for it, and a generic
+                // type's associated const is evaluated only when something
+                // names it, so a generic declaration that is never read would
+                // otherwise write two members under one key. Naming it here
+                // costs nothing and closes that.
+                const {
+                    let _ = <Self as $crate::Keys>::MAP;
+                };
                 // Each member carries its own trailing comma; the caller turns
                 // the last one into `}`. No per-field "first?" branch.
                 $( $crate::__write_member!(
                     w,
-                    $crate::__json_member!($($key)? [$field]),
+                    $crate::__json_member!([$case] $($key)? [$field]),
                     &self.$field
                     $(, $with)?
                 ); )*
@@ -425,7 +491,7 @@ macro_rules! __json_impls {
 #[macro_export]
 macro_rules! __beve_impls {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty {
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
         }
     ) => {
@@ -444,7 +510,7 @@ macro_rules! __beve_impls {
                         // The key arrived already delimited by its length
                         // prefix, so confirming the hash's candidate is one
                         // slice comparison against a constant.
-                        if key != $crate::__json_key!($($key)? [$field]).as_bytes() {
+                        if key != $crate::__json_key!([$case] $($key)? [$field]).as_bytes() {
                             return ::core::result::Result::Ok(false);
                         }
                         $crate::__beve_read_as!(&mut self.$field, r $(, $with)?)?;
@@ -462,12 +528,22 @@ macro_rules! __beve_impls {
                 &self,
                 w: &mut $crate::beve::Writer<'_, O>,
             ) {
+                // The duplicate-key check is in `KeyMap::build`, which nothing
+                // reaches but `Keys::MAP`. Reading looks a key up and so
+                // evaluates it; writing has no use for it, and a generic
+                // type's associated const is evaluated only when something
+                // names it, so a generic declaration that is never read would
+                // otherwise write two members under one key. Naming it here
+                // costs nothing and closes that.
+                const {
+                    let _ = <Self as $crate::Keys>::MAP;
+                };
                 // The member count went out with the object header, so a
                 // member is its pre-encoded key followed by its value and
                 // nothing else.
                 $( $crate::__write_member!(
                     w,
-                    $crate::__beve_key_bytes!($crate::__json_key!($($key)? [$field])),
+                    $crate::__beve_key_bytes!($crate::__json_key!([$case] $($key)? [$field])),
                     &self.$field
                     $(, $with)?
                 ); )*
@@ -506,29 +582,50 @@ macro_rules! __beve_impls {
     };
 }
 
-/// The key for a field: the explicit literal, or the field name.
+/// The key for a field: the explicit literal, the field name, or the field
+/// name put through the declaration's [case rule](crate::case).
+///
+/// The case slot holds `_` when the declaration named no rule. An explicit
+/// literal wins over a rule wherever both are present, which is what makes
+/// `"httpURL" => http_url` the escape hatch for a name the rule spells
+/// differently than you would.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __json_key {
-    ($key:literal [$field:ident]) => {
+    ([$case:tt] $key:literal [$field:ident]) => {
         $key
     };
-    ([$field:ident]) => {
+    ([_] [$field:ident]) => {
         ::core::stringify!($field)
+    };
+    ([$case:tt] [$field:ident]) => {
+        $crate::__case_apply!($case, ::core::stringify!($field))
     };
 }
 
-/// The pre-quoted `"key":` prefix, assembled at compile time so writing a JSON
-/// member is one copy of a constant string.
+/// The pre-quoted `"key":` prefix, assembled during const evaluation so that
+/// writing a JSON member is one copy of a constant string.
+///
+/// A function of [`__json_key!`](crate::__json_key) rather than a second copy
+/// of the literal-or-name-or-rule choice, so the prefix a member is written
+/// with and the key the reader confirms cannot come to describe different
+/// members. The BEVE side is built the same way, from the same call.
+///
+/// `concat!` would do for the two forms whose key *is* a literal, and did
+/// before there was a third: a converted key exists only once a `const fn` has
+/// run, and `concat!` takes literals and nothing else.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __json_member {
-    ($key:literal [$field:ident]) => {
-        ::core::concat!("\"", $key, "\":")
-    };
-    ([$field:ident]) => {
-        ::core::concat!("\"", ::core::stringify!($field), "\":")
-    };
+    ($($key:tt)*) => {{
+        const KEY: &str = $crate::__json_key!($($key)*);
+        const N: usize = KEY.len() + 3;
+        // Braced for `__beve_key_bytes!`'s reason: a bare `N` in
+        // generic-argument position parses as a type.
+        const PREFIX: [u8; N] = $crate::json::quoted_key::<{ N }>(KEY);
+        const OUT: &str = $crate::case::as_str(&PREFIX);
+        OUT
+    }};
 }
 
 /// The pre-encoded `SIZE | KEY` bytes of a BEVE object key, assembled during
@@ -550,6 +647,63 @@ macro_rules! __beve_key_bytes {
         const ENCODED: [u8; N] = $crate::beve::header::encode_key::<{ N }>(KEY);
         &ENCODED
     }};
+}
+
+/// A name put through a case rule, during const evaluation.
+///
+/// The result is a `const` item, so it lives in read-only memory and the
+/// declaration pays for the conversion once at compile time. See
+/// [`case`](crate::case) for what the rule does to a name.
+///
+/// The rule reaches [`case::style`](crate::case::style) as an expression
+/// rather than being matched against a list of spellings here, for the reason
+/// the adapter helpers below give: a fragment captured by someone else's macro
+/// does not re-match a token, so a wrapper macro passing its own
+/// `$rule:literal` along would find every spelling rejected.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __case_apply {
+    ($case:literal, $name:expr) => {{
+        const NAME: &str = $name;
+        // Bound before it is looked up so that a literal of the wrong kind is
+        // "expected `&str`" at the declaration rather than a type error deep
+        // inside an expansion.
+        const RULE: &str = $case;
+        const STYLE: $crate::case::Style = $crate::case::style(RULE);
+        const N: usize = $crate::case::cased_len(NAME, STYLE);
+        // Braced for `__beve_key_bytes!`'s reason.
+        const CASED: [u8; N] = $crate::case::cased::<{ N }>(NAME, STYLE);
+        const OUT: &str = $crate::case::as_str(&CASED);
+        OUT
+    }};
+    // Reported by `__case_check!`, once for the declaration rather than once
+    // per site. Falling back to the name keeps the expansion type-correct so
+    // that the one error is the one the reader sees.
+    ($other:tt, $name:expr) => {
+        $name
+    };
+}
+
+/// Refuse a case rule that is not a string.
+///
+/// Checked once for the declaration, because [`__case_apply!`] runs at five
+/// sites per field and a rule written without its quotes would otherwise be
+/// reported five times over.
+///
+/// [`__case_apply!`]: crate::__case_apply
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __case_check {
+    (_) => {};
+    ($case:literal) => {};
+    ($other:tt) => {
+        ::core::compile_error!(::core::concat!(
+            "structio: `",
+            ::core::stringify!($other),
+            "` is not a case rule; a rule is written as a string, as in \
+             `object!(Root as \"camelCase\" { .. })`"
+        ));
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -769,19 +923,50 @@ macro_rules! beve_array {
 macro_rules! __declare_array {
     // Generics that already declare `'de`: the type borrows from the input, so
     // both impls use the list verbatim.
+    //
+    // A case rule goes in front of each shape rather than after all three. An
+    // arm that fails to match falls through, but a `$ty:ty` handed something
+    // that cannot be a type at all is a parse error that ends the expansion,
+    // so a trailing arm would never be reached from a generic declaration.
+    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as $case:tt [ $($body:tt)* ]) => {
+        $crate::__no_array_case!();
+    };
     ($m:ident [ 'de $($gen:tt)* ] $ty:ty [ $($body:tt)* ]) => {
         $crate::__elements_impl!(['de $($gen)*] $ty [ $($body)* ]);
         $crate::$m!(['de $($gen)*] ['de $($gen)*] $ty [ $($body)* ]);
     };
     // Generics without `'de`: the read impls need it, the write impls must not
     // declare an unconstrained lifetime.
+    ($m:ident [ $($gen:tt)* ] $ty:ty as $case:tt [ $($body:tt)* ]) => {
+        $crate::__no_array_case!();
+    };
     ($m:ident [ $($gen:tt)* ] $ty:ty [ $($body:tt)* ]) => {
         $crate::__elements_impl!([$($gen)*] $ty [ $($body)* ]);
         $crate::$m!(['de, $($gen)*] [$($gen)*] $ty [ $($body)* ]);
     };
+    ($m:ident $ty:ty as $case:tt [ $($body:tt)* ]) => {
+        $crate::__no_array_case!();
+    };
     ($m:ident $ty:ty [ $($body:tt)* ]) => {
         $crate::__elements_impl!([] $ty [ $($body)* ]);
         $crate::$m!(['de] [] $ty [ $($body)* ]);
+    };
+}
+
+/// Refuse a [case rule](crate::case) on a positional struct.
+///
+/// [`array!`] writes no keys at all, so a rule would have nothing to convert
+/// and silently doing nothing is the wrong answer. Without this arm the
+/// declaration simply fails to match and the error points into this crate
+/// rather than at the `as "camelCase"` that caused it.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __no_array_case {
+    () => {
+        ::core::compile_error!(
+            "structio: a positional struct has no keys, so a case rule has nothing to \
+             convert. Case rules belong on `object!`, `unit_enum!` and `tagged_enum!`."
+        );
     };
 }
 
@@ -1019,6 +1204,17 @@ macro_rules! __beve_array_body {
 /// # assert_eq!(structio::to_string(&Level::Info), "\"info\"");
 /// ```
 ///
+/// A [case rule](crate::case) renames the lot at once, and reads a variant
+/// name as words rather than as a snake_case string, so the capitals a Rust
+/// variant is spelled with are where it splits.
+///
+/// ```
+/// # #[derive(Default, PartialEq, Debug)]
+/// # enum Mode { #[default] ReadOnly, ReadWrite }
+/// structio::unit_enum!(Mode as "kebab-case" { ReadOnly, ReadWrite });
+/// # assert_eq!(structio::to_string(&Mode::ReadWrite), "\"read-write\"");
+/// ```
+///
 /// # Why it is a macro of its own
 ///
 /// It will not compile if a variant carries a value, so the wire form is a
@@ -1055,9 +1251,19 @@ macro_rules! unit_enum {
     // Generics take a rule of their own rather than an optional group, because
     // a type may itself begin with `[` and the parser cannot tell which is
     // meant until it has committed.
+    ([$($gen:tt)*] $ty:ty as $case:tt { $($($name:literal =>)? $variant:ident),* $(,)? }) => {
+        $crate::__declare_enum!(
+            __both_unit_enum_impls [$($gen)*] $ty as $case { $($($name =>)? $variant),* }
+        );
+    };
     ([$($gen:tt)*] $ty:ty { $($($name:literal =>)? $variant:ident),* $(,)? }) => {
         $crate::__declare_enum!(
             __both_unit_enum_impls [$($gen)*] $ty { $($($name =>)? $variant),* }
+        );
+    };
+    ($ty:ty as $case:tt { $($($name:literal =>)? $variant:ident),* $(,)? }) => {
+        $crate::__declare_enum!(
+            __both_unit_enum_impls $ty as $case { $($($name =>)? $variant),* }
         );
     };
     ($ty:ty { $($($name:literal =>)? $variant:ident),* $(,)? }) => {
@@ -1119,8 +1325,9 @@ macro_rules! unit_enum {
 /// );
 /// ```
 ///
-/// Names are renamed the same way a field is, and generics go in brackets
-/// before the type, exactly as for [`object!`]:
+/// Names are renamed the same way a field is, they take a
+/// [case rule](crate::case) the same way, and generics go in brackets before
+/// the type, exactly as for [`object!`]:
 ///
 /// ```
 /// # #[derive(Default, PartialEq, Debug)]
@@ -1250,17 +1457,34 @@ macro_rules! beve_tagged_enum {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __declare_enum {
+    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
+        $crate::__declared_enum!($m ['de $($gen)*] ['de $($gen)*] [$case] $ty { $($body)* });
+    };
     ($m:ident [ 'de $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
-        $crate::__variants_impl!(['de $($gen)*] $ty { $($body)* });
-        $crate::$m!(['de $($gen)*] ['de $($gen)*] $ty { $($body)* });
+        $crate::__declared_enum!($m ['de $($gen)*] ['de $($gen)*] [_] $ty { $($body)* });
+    };
+    ($m:ident [ $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
+        $crate::__declared_enum!($m ['de, $($gen)*] [$($gen)*] [$case] $ty { $($body)* });
     };
     ($m:ident [ $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
-        $crate::__variants_impl!([$($gen)*] $ty { $($body)* });
-        $crate::$m!(['de, $($gen)*] [$($gen)*] $ty { $($body)* });
+        $crate::__declared_enum!($m ['de, $($gen)*] [$($gen)*] [_] $ty { $($body)* });
+    };
+    ($m:ident $ty:ty as $case:tt { $($body:tt)* }) => {
+        $crate::__declared_enum!($m ['de] [] [$case] $ty { $($body)* });
     };
     ($m:ident $ty:ty { $($body:tt)* }) => {
-        $crate::__variants_impl!([] $ty { $($body)* });
-        $crate::$m!(['de] [] $ty { $($body)* });
+        $crate::__declared_enum!($m ['de] [] [_] $ty { $($body)* });
+    };
+}
+
+/// [`__declared!`](crate::__declared) for the enum forms.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __declared_enum {
+    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty { $($body:tt)* }) => {
+        $crate::__case_check!($case);
+        $crate::__variants_impl!([$($wgen)*] [$case] $ty { $($body)* });
+        $crate::$m!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
     };
 }
 
@@ -1269,9 +1493,9 @@ macro_rules! __declare_enum {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __both_unit_enum_impls {
-    ([$($rgen:tt)*] [$($wgen:tt)*] $ty:ty { $($body:tt)* }) => {
-        $crate::__json_enum_impls!([$($rgen)*] [$($wgen)*] $ty { $($body)* });
-        $crate::__beve_unit_enum_impls!([$($rgen)*] [$($wgen)*] $ty { $($body)* });
+    ([$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty { $($body:tt)* }) => {
+        $crate::__json_enum_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
+        $crate::__beve_unit_enum_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
     };
 }
 
@@ -1279,9 +1503,9 @@ macro_rules! __both_unit_enum_impls {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __both_enum_impls {
-    ([$($rgen:tt)*] [$($wgen:tt)*] $ty:ty { $($body:tt)* }) => {
-        $crate::__json_enum_impls!([$($rgen)*] [$($wgen)*] $ty { $($body)* });
-        $crate::__beve_enum_impls!([$($rgen)*] [$($wgen)*] $ty { $($body)* });
+    ([$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty { $($body:tt)* }) => {
+        $crate::__json_enum_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
+        $crate::__beve_enum_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
     };
 }
 
@@ -1316,7 +1540,7 @@ macro_rules! __payload_is_wildcard {
 #[macro_export]
 macro_rules! __variants_impl {
     (
-        [$($wgen:tt)*] $ty:ty {
+        [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         }
     ) => {
@@ -1325,7 +1549,7 @@ macro_rules! __variants_impl {
 
         impl<$($wgen)*> $crate::Variants for $ty {
             const VARIANTS: &'static [&'static str] = &[
-                $( $crate::__json_key!($($name)? [$variant]) ),*
+                $( $crate::__json_key!([$case] $($name)? [$variant]) ),*
             ];
             // Built from `Self::VARIANTS`, and promoted to an anonymous static,
             // for the reasons `Keys::MAP` is.
@@ -1338,7 +1562,7 @@ macro_rules! __variants_impl {
 #[macro_export]
 macro_rules! __json_enum_impls {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty {
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         }
     ) => {
@@ -1359,7 +1583,7 @@ macro_rules! __json_enum_impls {
                     if index == i {
                         return $crate::__json_read_name!(
                             self, p,
-                            $crate::__json_key!($($name)? [$variant]),
+                            $crate::__json_key!([$case] $($name)? [$variant]),
                             $variant $(($($payload)*))?
                         );
                     }
@@ -1380,7 +1604,7 @@ macro_rules! __json_enum_impls {
                     if index == i {
                         return $crate::__json_read_payload!(
                             self, p,
-                            $crate::__json_key!($($name)? [$variant]),
+                            $crate::__json_key!([$case] $($name)? [$variant]),
                             $variant $(($($payload)*))?
                         );
                     }
@@ -1404,11 +1628,21 @@ macro_rules! __json_enum_impls {
             #[inline]
             #[allow(irrefutable_let_patterns)]
             fn write<O: $crate::Options>(&self, w: &mut $crate::json::Writer<'_, O>) {
+                // The duplicate-name check is in `KeyMap::build`, which nothing
+                // reaches but `Variants::MAP`. Reading looks a name up and so
+                // evaluates it; writing has no use for it, and a generic
+                // type's associated const is evaluated only when something
+                // names it, so a generic declaration that is never read would
+                // otherwise write two variants under one name. Naming it here
+                // costs nothing and closes that.
+                const {
+                    let _ = <Self as $crate::Variants>::MAP;
+                };
                 $(
                     $crate::__write_variant!(
                         self, w,
-                        $crate::__json_key!($($name)? [$variant]),
-                        $crate::__json_member!($($name)? [$variant]),
+                        $crate::__json_key!([$case] $($name)? [$variant]),
+                        $crate::__json_member!([$case] $($name)? [$variant]),
                         $variant $(($($payload)*))?
                     );
                 )*
@@ -1524,11 +1758,11 @@ macro_rules! __write_variant {
 #[macro_export]
 macro_rules! __beve_enum_impls {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty {
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         }
     ) => {
-        $crate::__beve_enum_body!([$($rgen)*] [$($wgen)*] $ty {
+        $crate::__beve_enum_body!([$($rgen)*] [$($wgen)*] [$case] $ty {
             $($($name =>)? $variant $(($($payload)*))?),*
         } {});
     };
@@ -1551,11 +1785,11 @@ macro_rules! __beve_enum_impls {
 #[macro_export]
 macro_rules! __beve_unit_enum_impls {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty {
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($($name:literal =>)? $variant:ident),* $(,)?
         }
     ) => {
-        $crate::__beve_enum_body!([$($rgen)*] [$($wgen)*] $ty {
+        $crate::__beve_enum_body!([$($rgen)*] [$($wgen)*] [$case] $ty {
             $($($name =>)? $variant),*
         } {
             const ARRAY: ::core::option::Option<&'static [u8]> =
@@ -1576,7 +1810,7 @@ macro_rules! __beve_unit_enum_impls {
                 // the compiler checks the arms cover the enum.
                 for item in items {
                     w.write_str_body(match item {
-                        $( Self::$variant => $crate::__json_key!($($name)? [$variant]) ),*
+                        $( Self::$variant => $crate::__json_key!([$case] $($name)? [$variant]) ),*
                     });
                 }
             }
@@ -1590,7 +1824,7 @@ macro_rules! __beve_unit_enum_impls {
 #[macro_export]
 macro_rules! __beve_enum_body {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty {
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         } { $($typed:tt)* }
     ) => {
@@ -1607,7 +1841,7 @@ macro_rules! __beve_enum_body {
                     if index == i {
                         return $crate::__beve_read_name!(
                             self, name,
-                            $crate::__json_key!($($name)? [$variant]),
+                            $crate::__json_key!([$case] $($name)? [$variant]),
                             $variant $(($($payload)*))?
                         );
                     }
@@ -1629,7 +1863,7 @@ macro_rules! __beve_enum_body {
                     if index == i {
                         return $crate::__beve_read_payload!(
                             self, name, r,
-                            $crate::__json_key!($($name)? [$variant]),
+                            $crate::__json_key!([$case] $($name)? [$variant]),
                             $variant $(($($payload)*))?
                         );
                     }
@@ -1653,11 +1887,21 @@ macro_rules! __beve_enum_body {
             #[inline]
             #[allow(irrefutable_let_patterns)]
             fn write<O: $crate::Options>(&self, w: &mut $crate::beve::Writer<'_, O>) {
+                // The duplicate-name check is in `KeyMap::build`, which nothing
+                // reaches but `Variants::MAP`. Reading looks a name up and so
+                // evaluates it; writing has no use for it, and a generic
+                // type's associated const is evaluated only when something
+                // names it, so a generic declaration that is never read would
+                // otherwise write two variants under one name. Naming it here
+                // costs nothing and closes that.
+                const {
+                    let _ = <Self as $crate::Variants>::MAP;
+                };
                 $(
                     $crate::__write_variant!(
                         self, w,
-                        $crate::__json_key!($($name)? [$variant]),
-                        $crate::__beve_key_bytes!($crate::__json_key!($($name)? [$variant])),
+                        $crate::__json_key!([$case] $($name)? [$variant]),
+                        $crate::__beve_key_bytes!($crate::__json_key!([$case] $($name)? [$variant])),
                         $variant $(($($payload)*))?
                     );
                 )*
