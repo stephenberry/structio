@@ -24,6 +24,8 @@ Every one of the 4,278,190,078 finite non-zero values round-trips, and no decima
 
 Both formats share one table but reach it through different entry points, since JSON has to find where a key ends and BEVE is told. Those two are asserted to resolve every key of every generated set to the same index, which is what guards against them drifting apart.
 
+**A `#[required]` field's bit is the same index**, so the mask is checked against what the readers actually set rather than only against the declaration: one case per marked field in each format, from documents that carry every other member. The case worth the trouble is the wide struct. A mark needs a bit only for itself, so a struct of more than 64 fields may still have one, and the field past the 64th is where an implementation would go wrong quietly -- a shift by 64 wraps to bit 0 on most machines, which would credit a marked field for a member that is not there. A 70-field struct is read from a document holding only its 65th member and required to refuse it, in both formats.
+
 ## Round-tripping
 
 **JSON** is fuzzed over 20k generated documents containing escapes, multi-byte UTF-8, astral-plane characters, and subnormal and extreme floats. Every prefix and single-byte corruption of 2300 documents is checked to produce an error rather than a panic.

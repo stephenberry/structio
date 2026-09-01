@@ -33,6 +33,36 @@ pub trait Keys {
     /// A reference rather than a value, so the table lives in read-only memory
     /// and is never copied onto the stack at a call site.
     const MAP: &'static KeyMap;
+
+    /// Bit `i` set for each field that a document must supply, in
+    /// [`KEYS`](Keys::KEYS) order.
+    ///
+    /// Where [`Options::ERROR_ON_MISSING_KEYS`] is the reader's answer to "may
+    /// a member be left out", this is the type's, and the two are a union: a
+    /// field marked here is required under every policy, and
+    /// [`RequireKeys`](crate::RequireKeys) requires every field whether or not
+    /// any is marked. Absence is otherwise no error, so the default is zero and
+    /// a schema that says nothing about it reads exactly as it did before.
+    ///
+    /// Written by [`object!`](crate::object) from the `#[required]` markers in
+    /// a declaration. A hand-written impl may set it directly, and should set
+    /// no bit past the end of [`KEYS`](Keys::KEYS): such a bit asks for a field
+    /// that cannot be filled, so no reading under the default policy would ever
+    /// succeed, while [`RequireKeys`](crate::RequireKeys) would discard it
+    /// along with the rest of the mask and accept the same document.
+    ///
+    /// **A marked field must be one of the first 64 declared.** The mask is a
+    /// `u64`, and a field past that has no bit to set. Marking one is a build
+    /// error naming the limit, reported when the crate is built rather than by
+    /// `cargo check`, the mask being a constant of a generic type.
+    ///
+    /// The struct itself may be wider: only the fields that are marked need
+    /// room here, unlike
+    /// [`ERROR_ON_MISSING_KEYS`](Options::ERROR_ON_MISSING_KEYS), which needs a
+    /// bit for every one and so caps the whole struct.
+    ///
+    /// [`Options::ERROR_ON_MISSING_KEYS`]: crate::Options::ERROR_ON_MISSING_KEYS
+    const REQUIRED: u64 = 0;
 }
 
 /// The variant names of an enum, and their compile-time perfect hash.
@@ -57,34 +87,65 @@ pub trait Variants {
     const MAP: &'static KeyMap;
 }
 
-/// The bookkeeping behind [`Options::ERROR_ON_MISSING_KEYS`], and the one
-/// place a struct too wide for it is refused.
+/// The bookkeeping behind [`Options::ERROR_ON_MISSING_KEYS`] and
+/// [`Keys::REQUIRED`], and the one place a struct too wide for the first is
+/// refused.
 ///
 /// An object reader sets bit `i` when it fills field `i`; an object that ends
-/// holding anything less than [`ALL`](Fields::ALL) left a declared member out.
+/// holding anything less than [`MASK`](Fields::MASK) left a member out that
+/// either the policy or the type insisted on.
 pub(crate) struct Fields<O, T>(PhantomData<fn(O, T)>);
 
 impl<O: Options, T: Keys> Fields<O, T> {
-    /// One bit per declared field, every one set.
+    /// The bits an object has to end up holding: every field under a policy
+    /// that requires them all, and otherwise the ones the type marked.
     ///
-    /// The assertion is the 64-field cap. It is written against the policy and
-    /// not against `T` alone so that a wider struct stays perfectly legal for
-    /// every reading that never builds the mask, which is the default one.
-    /// Gating it with an `if` instead would not do that: a constant is
-    /// evaluated whether or not the branch that reads it is taken, so the
-    /// policy has to appear in the condition rather than around it.
+    /// Zero when neither asks for anything, which makes the comparison against
+    /// it `0 != 0` and takes the whole check out of the reader.
     ///
-    /// Being a constant of a generic type, it is refused at build time rather
-    /// than by `cargo check`.
-    pub(crate) const ALL: u64 = {
+    /// The assertion is the 64-field cap, and it sits inside the branch that
+    /// needs it rather than in front of both. Const evaluation follows the
+    /// control flow, so a struct too wide for a bit per field stays perfectly
+    /// legal for every reading that does not ask for one -- which is every
+    /// reading under the default policy, whatever the type marks.
+    ///
+    /// Being a constant of a generic type, it is refused when the crate is
+    /// built rather than by `cargo check`.
+    pub(crate) const MASK: u64 = if O::ERROR_ON_MISSING_KEYS {
         let n = T::MAP.n as usize;
         assert!(
-            !O::ERROR_ON_MISSING_KEYS || n <= 64,
+            n <= 64,
             "ERROR_ON_MISSING_KEYS tracks one bit per field in a u64, \
              so it cannot read a struct of more than 64 fields"
         );
-        if n >= 64 { u64::MAX } else { (1u64 << n) - 1 }
+        if n == 64 { u64::MAX } else { (1u64 << n) - 1 }
+    } else {
+        T::REQUIRED
     };
+
+    /// Whether a filled field is worth recording. False leaves `seen` a
+    /// constant zero and the `|=` in the read loop unreachable.
+    pub(crate) const TRACK: bool = Self::MASK != 0;
+
+    /// Whether every field has a bit, which is every struct the 64-field cap
+    /// admits.
+    const NARROW: bool = T::MAP.n as usize <= 64;
+
+    /// Bit `index` of the seen mask, or nothing for a field the mask has no
+    /// room for.
+    ///
+    /// The comparison is live only for a struct of more than 64 fields that
+    /// marks one of its first 64 required, [`MASK`](Fields::MASK) having
+    /// refused every other wide reading. Anywhere else `NARROW` is a constant
+    /// `true` and this is the shift alone.
+    #[inline(always)]
+    pub(crate) const fn seen(index: usize) -> u64 {
+        if Self::NARROW || index < 64 {
+            1u64 << index
+        } else {
+            0
+        }
+    }
 }
 
 /// Convenience bound for generic containers: readable and writable in every

@@ -75,6 +75,7 @@ Reach for structio when one of these matters more:
 - **No proc-macros.** `object!`, `array!` and `tagged_enum!` are `macro_rules!` macros.
 - **One schema, both formats.** The field list and its hash table are declared once and shared; only the bytes differ.
 - **Objects or arrays.** `object!` declares a struct by key, `array!` by position, for types like a coordinate whose field names carry nothing.
+- **Required members, one at a time.** A field marked `#[required]` has to be in the document; the rest keep their defaults when it is quiet. Mixed schemas are most schemas, so this is the type's business rather than a reader policy.
 - **Enums by name, not by index.** `unit_enum!` writes a variant as its name; `tagged_enum!` writes one carrying a value as a one-member object keyed by that name. Adding or reordering variants does not change what a document already means.
 - **Keys are hashed at compile time.** The macro picks the cheapest perfect hash that fits your key set, from a single byte comparison up to a full key hash.
 - **Reads reuse what you already own.** Parsing into an existing value refills its buffers instead of reallocating them, so a loop over records of the same shape settles into no allocation at all.
@@ -146,7 +147,7 @@ The crate root carries the JSON entry points unqualified and the BEVE ones with 
 
 | | |
 |---|---|
-| [Schemas and types](docs/schemas.md) | Renaming keys, positional structs, generics and borrowing, the supported type set, writing impls by hand. |
+| [Schemas and types](docs/schemas.md) | Renaming keys, required fields, positional structs, generics and borrowing, the supported type set, writing impls by hand. |
 | [Enums](docs/enums.md) | The two wire forms and which of them reading accepts, renaming variants, what is refused and with which error, the policies, and the BEVE string-array form. |
 | [BEVE](docs/beve.md) | What the binary format buys you, pointers and validation, turning a document you have no type for into JSON, and what is not implemented yet. |
 | [Options](docs/options.md) | Indenting JSON, keeping arrays on one line, leaving null members out, refusing unknown keys, requiring declared ones, reading comments, prettifying and minifying text that is already JSON, and writing your own policy. |
@@ -172,9 +173,9 @@ No comparison against `serde_json` has been run, so please do not infer one.
 
 **Two formats.** Of the formats Glaze supports, JSON and BEVE are here; CSV, TOML, and the rest are not.
 
-**Few options.** [`Options`](docs/options.md) covers indentation, keeping an array on the line it began on, leaving null members out, refusing a key nothing claims, requiring every key the schema declares, and reading JSONC comments, which is where Glaze's `glz::opts` starts.
+**Few options.** [`Options`](docs/options.md) covers indentation, keeping an array on the line it began on, leaving null members out, refusing a key nothing claims, requiring every key the schema declares, and reading JSONC comments, which is where Glaze's `glz::opts` starts. Requiring *some* of the keys is a property of the schema rather than a policy: mark those fields [`#[required]`](docs/schemas.md#required-fields).
 
-**No `serde` attributes.** Keys can be renamed, null members can be skipped, and that is the extent of it. There is no `flatten`, no enum tagging strategy, no case conversion.
+**Few `serde` attributes.** Keys can be renamed, fields can be marked [`#[required]`](docs/schemas.md#required-fields), null members can be skipped, and that is the extent of it. There is no `flatten`, no enum tagging strategy, no case conversion.
 
 **Foreign types need an adapter or a wrapper.** Rust's orphan rule means you cannot describe a type from another crate the way you can specialize `glz::meta` for any C++ type. A field can name an [adapter](docs/schemas.md#types-you-do-not-own) that says how its type is read and written, which keeps the type out of your API; a newtype is still the answer when the foreign type has no `Default`, or when it appears in many structs.
 

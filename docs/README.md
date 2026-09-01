@@ -6,10 +6,10 @@ Start with the [README](../README.md) for installation and a first example. Thes
 
 | | |
 |---|---|
-| [Schemas and types](schemas.md) | Declaring a struct's schema as an object or as an array, renaming keys, generics and borrowing, the supported type set, and writing the impls by hand. |
+| [Schemas and types](schemas.md) | Declaring a struct's schema as an object or as an array, renaming keys, marking members the document has to carry, generics and borrowing, the supported type set, and writing the impls by hand. |
 | [Enums](enums.md) | Declaring a unit or tagged enum, the two wire forms and which of them reading accepts, renaming variants, generics and borrowing, what is refused and with which error, how the policies meet a tag, and the string array a run of unit variants becomes in BEVE. |
 | [BEVE](beve.md) | What the binary format buys you, how it differs from JSON in practice, reaching one field without decoding the rest, turning a document you have no type for into JSON, complex numbers and matrices, writing arrays a reader can point at and borrowing one back, framing a body whose length has to be sent before it or that lands behind a header, and what is not implemented yet. |
-| [Options](options.md) | Indenting JSON, keeping arrays on one line, leaving null members out, refusing unknown keys, requiring declared ones, reading comments, laying out and minifying text that is already JSON, writing your own policy, and what the compile-time seam costs. |
+| [Options](options.md) | Indenting JSON, keeping arrays on one line, leaving null members out, refusing unknown keys, requiring every declared one, reading comments, laying out and minifying text that is already JSON, writing your own policy, and what the compile-time seam costs. |
 | [Streaming](streaming.md) | Reading documents that do not fit in memory, or have not fully arrived, and writing without assembling the output first. Both formats. |
 | [Errors](errors.md) | What errors carry, how to render them, and what each code means. |
 

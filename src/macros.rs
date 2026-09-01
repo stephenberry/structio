@@ -39,6 +39,37 @@
 /// });
 /// ```
 ///
+/// A member a document has to carry is marked `#[required]`. Absence is
+/// otherwise no error: an unmarked field the document leaves out keeps
+/// whatever the destination already held.
+///
+/// ```
+/// # use structio::{ErrorCode, from_str};
+/// #[derive(Debug, Default)]
+/// struct Asset { version: String, min_version: u32, generator: String }
+///
+/// structio::object!(Asset {
+///     #[required] version,
+///     #[required] "minVersion" => min_version,
+///     generator,
+/// });
+///
+/// // The optional member may be left out.
+/// assert!(from_str::<Asset>(r#"{"version":"2.0","minVersion":1}"#).is_ok());
+/// // A required one may not.
+/// assert_eq!(
+///     from_str::<Asset>(r#"{"generator":"g"}"#).unwrap_err().code,
+///     ErrorCode::MissingKey,
+/// );
+/// ```
+///
+/// This is the type's own answer, so it holds under every policy, and
+/// [`RequireKeys`](crate::RequireKeys) still requires the members no mark did.
+/// It is the setting to reach for where a schema is mixed, which is most of
+/// them. See [`Keys::REQUIRED`](crate::Keys::REQUIRED) for the mask it writes
+/// and the one limit on it: a marked field must be among the first 64
+/// declared.
+///
 /// A field whose type this crate does not describe, and which you cannot
 /// implement the traits for because you own neither of them, names an
 /// *adapter* instead: a type of your own that says how that type is read and
@@ -235,13 +266,37 @@ macro_rules! __each_name_once {
     };
 }
 
+/// Whether a field carried the `#[required]` marker.
+///
+/// A field's markers reach [`__keys_impl!`](crate::__keys_impl) as an optional
+/// token, which `macro_rules!` can act on only by handing it to a macro that
+/// branches on its presence. The last arm is what turns a misspelling into a
+/// message rather than into "no rules expected this token".
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __is_required {
+    () => {
+        false
+    };
+    (required) => {
+        true
+    };
+    ($other:ident) => {
+        ::core::compile_error!(::core::concat!(
+            "unrecognized field marker `#[",
+            ::core::stringify!($other),
+            "]`; the only one is `#[required]`"
+        ))
+    };
+}
+
 /// The format-independent half: the key list and its compile-time hash.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __keys_impl {
     (
         [$($wgen:tt)*] $ty:ty {
-            $($($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
+            $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
         }
     ) => {
         $crate::__each_name_once!($($field),*);
@@ -257,16 +312,41 @@ macro_rules! __keys_impl {
             // table lives in read-only memory and is never copied onto the
             // stack at a lookup site.
             const MAP: &'static $crate::KeyMap = &$crate::KeyMap::build(Self::KEYS);
+
+            // `macro_rules!` cannot count, so the field index is carried in a
+            // counter, here through const evaluation rather than through the
+            // optimizer. Zero for a declaration that marks nothing, which is
+            // what takes the check back out of both readers.
+            #[allow(unused_assignments, unused_mut)]
+            const REQUIRED: u64 = {
+                let mut mask = 0u64;
+                let mut i = 0u32;
+                $(
+                    if $crate::__is_required!($($req)?) {
+                        assert!(
+                            i < 64,
+                            "a #[required] field must be one of the first 64 \
+                             declared: the mask that tracks them is a u64"
+                        );
+                        mask |= 1u64 << i;
+                    }
+                    i += 1;
+                )*
+                mask
+            };
         }
     };
 }
 
+/// The `#[required]` marker is matched and dropped here: which members a
+/// document has to carry is a property of the schema, so only
+/// [`__keys_impl!`](crate::__keys_impl) acts on it.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __json_impls {
     (
         [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty {
-            $($($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
+            $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
         }
     ) => {
         impl<$($rgen)*> $crate::json::ReadObject<'de> for $ty {
@@ -338,12 +418,15 @@ macro_rules! __json_impls {
     };
 }
 
+/// The `#[required]` marker is matched and dropped here: which members a
+/// document has to carry is a property of the schema, so only
+/// [`__keys_impl!`](crate::__keys_impl) acts on it.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __beve_impls {
     (
         [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty {
-            $($($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
+            $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
         }
     ) => {
         impl<$($rgen)*> $crate::beve::ReadObject<'de> for $ty {
@@ -568,6 +651,11 @@ macro_rules! __beve_is_null_as {
 /// assert_eq!(structio::to_string(&v), "[1,2,3]");
 /// assert_eq!(structio::from_str::<Vec3>("[1,2,3]").unwrap(), v);
 /// ```
+///
+/// The list holds field names and nothing else. [`object!`]'s `#[required]`
+/// marker has no counterpart here and is not accepted: an element is required
+/// by its position, and an array of the wrong length is refused under every
+/// policy.
 ///
 /// Generics work as they do for [`object!`]: in brackets before the type, with
 /// `'de` written out when the type borrows from the input.
@@ -1050,7 +1138,10 @@ macro_rules! unit_enum {
 /// `std::variant<A, B, C>` has and the one that composes: the payload is an
 /// ordinary type, declared with [`object!`] or [`array!`] or built in, and the
 /// enum adds only the tag. A Rust variant with several fields, or with named
-/// fields, is not accepted; give it a struct or a tuple instead.
+/// fields, is not accepted; give it a struct or a tuple instead. Neither is
+/// [`object!`]'s `#[required]` marker, which has nothing to say here: a variant
+/// declared as carrying a value can be read only from the object form that
+/// holds one, so its payload is required by the declaration itself.
 ///
 /// A payload type needs [`Default`], for the reason an `Option`'s payload
 /// does: reading a variant the destination is not already holding has to build

@@ -35,6 +35,36 @@ The key is a string literal, so it can hold anything the format can carry, inclu
 
 Field order in the declaration is the order members are **written**. Reading does not care about order.
 
+### Required fields
+
+A member the document has to carry is marked `#[required]`. Absence is otherwise no error, so an unmarked field the document leaves out keeps whatever the destination already held.
+
+```rust
+structio::object!(Asset {
+    #[required] version,
+    #[required] "minVersion" => min_version,
+    generator,
+});
+```
+
+That declaration accepts `{"version":"2.0","minVersion":1}` and refuses `{"generator":"blender"}` with a [`MissingKey`](errors.md), pointing at the brace that opened the incomplete object.
+
+This is what most real schemas need, and it is the reason to prefer it over the [`RequireKeys`](options.md#error_on_missing_keys) policy. Any format with a specification has mandatory members and optional ones side by side in one object, and a policy is all or nothing: off accepts a document missing something mandatory, on refuses a valid document that omitted an optional member. A mark says which is which, once, where the field is declared.
+
+Three things follow from the mark belonging to the *type* rather than to the reading.
+
+It holds under every policy, including the default one. A struct read as somebody else's member brings its requirements with it, and the outer declaration says nothing about them.
+
+It does not replace the policy. The two are a union: `RequireKeys` still requires the members no mark did, and marking one changes nothing about how that policy reads.
+
+And it is a fact about the document, not about the destination. [`read_into`](../README.md#json) over a value that already holds the answer still refuses a document that left the member out, because what is absent is absent whatever the destination happens to contain. A patch format wants no marks.
+
+A field of type `Option<T>` is not exempt, the test being whether the member is *present* rather than what it holds: `null` satisfies a mark and absence does not. So writing under [`SKIP_NULL`](options.md#skip_null) and marking the field it may drop contradict each other, in the way `SKIP_NULL` and `RequireKeys` already do.
+
+**A marked field must be among the first 64 declared.** The mask is one `u64`, and a field past the 64th has no bit in it. The struct itself may be wider, which is where this differs from `RequireKeys`: that policy needs a bit for *every* field and so refuses a struct of more than 64 outright, while a mark needs a bit only for itself. Marking one past the line is a build error naming the limit, and like the `RequireKeys` cap it is reported when the crate is *built* rather than by `cargo check` or by an editor running one, the mask being a constant of a generic type.
+
+Nothing else changes. Under the default policy a declaration that marks nothing generates what it always did, down to the instruction: the mask is then a constant zero, and the check against it folds away. Under `RequireKeys` the comparison is against a mask rather than against a count, which is a couple of instructions once per object and the same answer.
+
 ### Generics and borrowing
 
 Impl generics go in brackets before the type:
@@ -171,7 +201,7 @@ The array forms are the same count: `ReadArray` and `WriteArray` per format, `Re
 |---|---|
 | Keys arrive in a different order than declared | Fine. Order is irrelevant to reading. |
 | The document has a key you did not declare | Refused, as [`UnknownKey`](options.md#error_on_unknown_keys). Under [`SkipUnknown`](options.md#error_on_unknown_keys) it is skipped instead, whatever it holds, including nested objects and BEVE extensions. |
-| A declared field is absent from the document | Left exactly as it was in the destination value. Under [`RequireKeys`](options.md#error_on_missing_keys) it is a [`MissingKey`](options.md#error_on_missing_keys) instead. |
+| A declared field is absent from the document | Left exactly as it was in the destination value. A [`#[required]`](#required-fields) field is a [`MissingKey`](options.md#error_on_missing_keys) instead, as is any field under [`RequireKeys`](options.md#error_on_missing_keys). |
 | A member was left out by [`SKIP_NULL`](options.md#skip_null) | Absent, so the row above: the destination keeps what it had, and a `Default` destination gets the `None` back. Writing under `SKIP_NULL` and reading under `RequireKeys` therefore contradict each other. |
 | The same key appears twice | The last one wins. |
 | A value has the wrong type | An error, never a silent coercion. |
@@ -180,7 +210,7 @@ The first three rows are about keys, so they are about `object!`. A positional s
 
 Note that the second and third rows differ, and deliberately. A key you did not declare is a document saying something you have no place to put, which is usually a mistake worth hearing about. A field the document does not mention is a document that is merely quieter than it could have been, and the destination already holds an answer for it.
 
-"Left exactly as it was" is worth dwelling on, because it is what makes `read_into` useful: reading into a fresh `T::default()` gives you defaults for absent fields, and reading into a value you already populated gives you a merge. `RequireKeys` is exactly the policy that gives that up, and the two are meant to be at odds: a patch is a document that leaves members out, so a program that reads patches and a program that reads whole values want different policies rather than different calls.
+"Left exactly as it was" is worth dwelling on, because it is what makes `read_into` useful: reading into a fresh `T::default()` gives you defaults for absent fields, and reading into a value you already populated gives you a merge. `RequireKeys` is exactly the policy that gives that up, and the two are meant to be at odds: a patch is a document that leaves members out, so a program that reads patches and a program that reads whole values want different policies rather than different calls. A [`#[required]`](#required-fields) field gives it up for that member alone, and permanently: it is the type saying the document has to carry this one however it is read.
 
 ## Supported types
 

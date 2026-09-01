@@ -651,9 +651,9 @@ impl<'de, O: Options> Reader<'de, O> {
 
         let map = T::MAP;
         let fields = map.n as usize;
-        // One bit per field filled, compared against every field once the
-        // object ends. Never written, and so never read, unless the policy
-        // asks for it.
+        // One bit per field filled, compared once the object ends against the
+        // fields that had to be there. Never written, and so never read, unless
+        // the policy or the type asks for one.
         let mut seen = 0u64;
         for _ in 0..members {
             let n = self.count()?;
@@ -664,10 +664,8 @@ impl<'de, O: Options> Reader<'de, O> {
             let key = self.take(n)?;
             let index = map.lookup_sized(T::KEYS, key);
             let matched = index < fields && T::read_field(value, index, key, self)?;
-            if O::ERROR_ON_MISSING_KEYS && matched {
-                // `index < fields`, and the cap holds `fields` at 64 or under,
-                // so the shift is in range.
-                seen |= 1 << index;
+            if Fields::<O, T>::TRACK && matched {
+                seen |= Fields::<O, T>::seen(index);
             }
             if !matched {
                 if O::ERROR_ON_UNKNOWN_KEYS {
@@ -679,7 +677,8 @@ impl<'de, O: Options> Reader<'de, O> {
         }
 
         self.leave();
-        if O::ERROR_ON_MISSING_KEYS && seen != Fields::<O, T>::ALL {
+        let mask = Fields::<O, T>::MASK;
+        if seen & mask != mask {
             // Back to the object's header: the cursor is past the object by
             // now, and what is incomplete is the object, not what follows it.
             self.pos = open;

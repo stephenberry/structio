@@ -183,6 +183,15 @@ pub trait Options: Copy {
     /// Turn it on with [`RequireKeys`]. What it refuses is an
     /// [`ErrorCode::MissingKey`](crate::ErrorCode::MissingKey).
     ///
+    /// **All or nothing, which most schemas are not.** A format with a
+    /// specification usually has mandatory members and optional ones in the
+    /// same object, and neither setting of this fits: off accepts a document
+    /// missing something mandatory, on refuses a valid document that left an
+    /// optional member out. Mark the mandatory ones `#[required]` in the
+    /// declaration instead, which is [`Keys::REQUIRED`](crate::Keys::REQUIRED),
+    /// and leave this alone. The two are a union, so a policy that requires
+    /// everything still does.
+    ///
     /// **Object keys only**, for the same reasons the unknown-key setting is:
     /// an `array!` struct is checked by length already, and a map has no
     /// declared members to miss.
@@ -201,7 +210,9 @@ pub trait Options: Copy {
     /// `u64`. A struct with more fields than that read under this option is a
     /// compile error rather than a wider mask. The cap belongs to the option:
     /// no other setting looks at the field count, and a struct of any width
-    /// still reads under every other policy.
+    /// still reads under every other policy. A `#[required]` field needs a bit
+    /// only for itself, so a wider struct may still mark one, as long as what
+    /// it marks is among the first 64 declared.
     const ERROR_ON_MISSING_KEYS: bool = false;
 
     /// Read JSONC: `//` to the end of the line, and `/* */`, anywhere
@@ -391,6 +402,11 @@ impl Options for SkipUnknown {
 /// than a patch over one. It is the exact opposite of [`SkipUnknown`]: that
 /// one accepts a document that says more than the schema does, this one
 /// refuses a document that says less.
+///
+/// For a schema where only some members are mandatory, which is most of them,
+/// mark those `#[required]` in the declaration and read under the default
+/// policy. This is the blunt instrument, and it is the right one only where
+/// every member really is mandatory.
 ///
 /// ```
 /// # #[derive(Default, Debug)]

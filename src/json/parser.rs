@@ -270,9 +270,9 @@ impl<'de, O: Options> Parser<'de, O> {
         self.enter()?;
         self.skip_ws();
 
-        // One bit per field filled, compared against every field once the
-        // object ends. Never written, and so never read, unless the policy
-        // asks for it.
+        // One bit per field filled, compared once the object ends against the
+        // fields that had to be there. Never written, and so never read, unless
+        // the policy or the type asks for one.
         let mut seen = 0u64;
 
         if self.try_byte(b'}') {
@@ -292,10 +292,8 @@ impl<'de, O: Options> Parser<'de, O> {
             } else {
                 false
             };
-            if O::ERROR_ON_MISSING_KEYS && matched {
-                // `index < n`, and the cap holds `n` at 64 or under, so the
-                // shift is in range.
-                seen |= 1 << index;
+            if Fields::<O, T>::TRACK && matched {
+                seen |= Fields::<O, T>::seen(index);
             }
             if !matched {
                 if O::ERROR_ON_UNKNOWN_KEYS {
@@ -321,13 +319,14 @@ impl<'de, O: Options> Parser<'de, O> {
         }
     }
 
-    /// Refuse an object that ended with a declared field never filled.
+    /// Refuse an object that ended with a required field never filled.
     ///
-    /// Compiles to nothing under a policy that does not ask for it, `seen`
-    /// then being a constant zero compared against a constant it equals.
+    /// Compiles to nothing where nothing is required, the mask then being a
+    /// constant zero and `seen` a constant zero with it.
     #[inline]
     fn require_fields<T: Keys>(&mut self, seen: u64, open: usize) -> PResult<()> {
-        if O::ERROR_ON_MISSING_KEYS && seen != Fields::<O, T>::ALL {
+        let mask = Fields::<O, T>::MASK;
+        if seen & mask != mask {
             // Back to the opening brace: the cursor is past the object by now,
             // and what is incomplete is the object, not the byte after it.
             self.idx = open;

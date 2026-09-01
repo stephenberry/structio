@@ -114,12 +114,13 @@ pub enum ErrorCode {
     /// nowhere to go can be stepped over and the rest of the object still
     /// read; a variant with nowhere to go leaves the value itself undecided.
     UnknownVariant,
-    /// An object left out a field the destination declares, under
+    /// An object left out a field that had to be there: one marked
+    /// `#[required]` in the declaration, or any of them under
     /// [`Options::ERROR_ON_MISSING_KEYS`](crate::Options::ERROR_ON_MISSING_KEYS).
     ///
-    /// Off by default: absence otherwise means the destination keeps what it
-    /// already held. Read with [`RequireKeys`](crate::RequireKeys) to insist
-    /// on every one.
+    /// Neither is on by default: absence otherwise means the destination keeps
+    /// what it already held. Mark the members a document has to carry, or read
+    /// with [`RequireKeys`](crate::RequireKeys) to insist on every one.
     ///
     /// Which field is missing is not carried, an [`ErrorCode`] being one byte.
     /// The reported position is where the object began, its opening brace in

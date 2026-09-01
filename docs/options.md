@@ -48,7 +48,7 @@ The plain entry point is the `Standard` policy, so `to_string(v)` and `to_string
 | `PrettyInlineArrays` | Indented, with each array kept on one line. |
 | `SkipNull` | Compact, null members left out. |
 | `SkipUnknown` | Unknown keys stepped over rather than refused. |
-| `RequireKeys` | Every declared field required to be present. |
+| `RequireKeys` | Every declared field required to be present. For some of them rather than all, mark fields [`#[required]`](schemas.md#required-fields) instead. |
 | `AllowComments` | JSONC: `//` and `/* */` read wherever whitespace is allowed. |
 
 ## Writing your own
@@ -200,6 +200,8 @@ One consequence worth stating: values under an unknown key are stepped over rath
 
 A field the destination declares and the document never mentions is a `MissingKey`. The error is located where the object began, its opening brace in JSON and its header byte in BEVE: what is incomplete is the object, not the byte that closed it.
 
+**This is the blunt instrument, and most schemas want the other one.** A policy applies to the whole reading: every declared member has to be there or none of them does. A format with a specification has mandatory members and optional ones in the same object, and neither setting fits that. Mark the mandatory members [`#[required]`](schemas.md#required-fields) in the declaration and read under the default policy; this option is right only where every member really is mandatory. The two are a union, so turning it on still requires the members no mark did.
+
 This is **off** by default, where `ERROR_ON_UNKNOWN_KEYS` is on, and the asymmetry is deliberate. Reading is into a value that already exists, so a member the document does not mention means "keep what is there" rather than "no data". That is what makes `read_into` a merge, and a `Default` is a perfectly good answer for a field the document had no opinion about. Turning this on says the opposite, that the document is the whole truth about the value: right for a wire format, wrong for a patch. Glaze has `error_on_missing_keys` and also leaves it off.
 
 `RequireKeys` asks for it. It is the exact opposite of `SkipUnknown`: that one accepts a document saying more than the schema does, this one refuses a document saying less. The two settings are independent. The built-ins are one policy per setting and combinations are yours to declare, which for these two is worth doing:
@@ -223,7 +225,7 @@ An `Option<T>` field is not exempt. The test is whether the member is *present*,
 
 A repeated key fills one field twice rather than two fields once, so it never stands in for an absent one. An unknown key is refused before an absent one is noticed, the unknown key being refused where it sits and the absent one only once the object has ended.
 
-**At most 64 fields.** The bookkeeping is one bit per field in a single `u64`, set as each field is filled and compared against every field once the object ends. A struct wider than that read under this option is a compile error naming the limit, rather than a wider mask every narrower struct would pay for. The cap belongs to the option and not to the struct: no other setting looks at the field count, and a struct of any width still reads under every other policy.
+**At most 64 fields.** The bookkeeping is one bit per field in a single `u64`, set as each field is filled and compared against every field once the object ends. A struct wider than that read under this option is a compile error naming the limit, rather than a wider mask every narrower struct would pay for. The cap belongs to the option and not to the struct: no other setting looks at the field count, and a struct of any width still reads under every other policy. A `#[required]` field needs a bit only for itself rather than one for every field, so a wider struct may still mark one, as long as what it marks is among the first 64 declared.
 
 The refusal is a constant of a generic type, so it is reported when the crate is *built* rather than by `cargo check` or by an editor running one. The message names the limit, and the notes below it name your struct.
 

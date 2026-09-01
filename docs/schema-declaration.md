@@ -46,6 +46,16 @@ object!(Person {
 });
 ```
 
+Marking a member the document has to carry:
+
+```rust
+object!(Person {
+    #[required] "first-name" => first_name,
+    age,
+    friends,
+});
+```
+
 Nested types compose with no ceremony:
 
 ```rust
@@ -128,7 +138,7 @@ The `let mut i = 0; if index == i { .. } i += 1;` chain is not a stylistic choic
 ### Cons
 
 - **Field names are written twice** (once in the struct, once in the `object!` call). They can drift. A field added to the struct and forgotten in `object!` compiles fine and is silently absent from the output, in every format. This is the single real cost of this approach.
-- **Attribute syntax is clunkier.** Per-field options become positional or sigil-based (`"key" => field`) rather than `#[json(...)]`.
+- **Attribute syntax is clunkier.** A per-field option is either positional (`"key" => field`) or a bare marker (`#[required] field`) rather than an argument list like `#[json(rename = "key")]`. A `macro_rules!` matcher can carry a marker and reject a misspelled one, but it cannot parse an arbitrary attribute grammar, so every option has to earn its own place in the field syntax.
 - **Generics need explicit bound restatement** in the macro call, as shown above.
 - **Poorer error messages.** A type error inside a macro expansion points at the macro invocation, not the offending field.
 

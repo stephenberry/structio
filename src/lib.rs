@@ -227,8 +227,10 @@
 //! rather than passing over it in silence. Ask for [`SkipUnknown`] to read a
 //! subset of a larger document. The other way round, a declared field the
 //! document leaves out is simply left as the destination had it, since reading
-//! is into a value that already exists; [`RequireKeys`] is what refuses that
-//! instead.
+//! is into a value that already exists. Mark a field `#[required]` in the
+//! declaration and its absence is an [`ErrorCode::MissingKey`] under every
+//! policy, which is what a mixed schema wants; [`RequireKeys`] says the same of
+//! every field at once.
 //!
 //! ```
 //! use structio::{ErrorCode, SkipUnknown, from_str, from_str_with};
