@@ -69,7 +69,7 @@ jobs:
       - uses: actions/checkout@v5
       # Pinned deliberately: this is the version the manifest promises, so it
       # is checked exactly, not "whatever is oldest still supported".
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - run: cargo check --all-targets
 
   # What actually gets uploaded is the packaged tarball, not the working tree.
