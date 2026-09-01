@@ -28,6 +28,12 @@ Both formats share one table but reach it through different entry points, since 
 
 **A `#[required]` field's bit is the same index**, so the mask is checked against what the readers actually set rather than only against the declaration: one case per marked field in each format, from documents that carry every other member. The case worth the trouble is the wide struct. A mark needs a bit only for itself, so a struct of more than 64 fields may still have one, and the field past the 64th is where an implementation would go wrong quietly -- a shift by 64 wraps to bit 0 on most machines, which would credit a marked field for a member that is not there. A 70-field struct is read from a document holding only its 65th member and required to refuse it, in both formats.
 
+## Errors
+
+**A missing key names itself.** `ErrorCode::MissingKey` is the one code whose offset can only point at the enclosing object, a member that is not in the document having no position of its own. `Error::key` carries the absent key, taken from the same `KEYS` the perfect hash is built over, so it is the key the document should have used rather than the Rust field name. `tests/error_key.rs` checks that under a rename, under a case rule, under `#[required]` and under `RequireKeys`, in both formats.
+
+**A key never outlives the read that set it.** A successful read does not clear `Error::key`, so what keeps a stale one from attaching to a later, unrelated error is that `Parser::rewind` and `Reader::rewind` clear it. That is where the clearing has to live: a hand-written reader that speculates on a generated type discards a `MissingKey` whose key `read_object` set behind its back, so it cannot be asked to clear one it does not know exists, but it must wind back before trying anything else. `tests/error_key.rs` checks both halves, with a speculating reader that fails afterwards on something nameless, and with two streamed documents where the second does not inherit the first's key.
+
 ## Round-tripping
 
 **JSON** is fuzzed over 20k generated documents containing escapes, multi-byte UTF-8, astral-plane characters, and subnormal and extreme floats. Every prefix and single-byte corruption of 2300 documents is checked to produce an error rather than a panic.

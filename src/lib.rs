@@ -253,10 +253,11 @@
 //! let doc = r#"{"port":8080}"#;
 //!
 //! assert_eq!(from_str::<Server>(doc).unwrap().host, "");
-//! assert_eq!(
-//!     from_str_with::<RequireKeys, Server>(doc).unwrap_err().code,
-//!     ErrorCode::MissingKey
-//! );
+//! let e = from_str_with::<RequireKeys, Server>(doc).unwrap_err();
+//! assert_eq!(e.code, ErrorCode::MissingKey);
+//! // A member that is not there has no position of its own, so the offset
+//! // names the object and the error names the member.
+//! assert_eq!(e.key, Some("host"));
 //! ```
 //!
 //! The third is [`AllowComments`], which reads JSONC: `//` and `/* */`

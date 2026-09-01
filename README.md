@@ -84,7 +84,7 @@ Reach for structio when one of these matters more:
 - **Arrays a reader can point at.** `to_beve_aligned` writes BEVE's aligned typed arrays, padding each numeric payload onto its own element width so the block can be borrowed rather than copied. A `Cow<'de, [f64]>` field takes that borrow where the document allows it and copies where it does not. The same document either way, and every reader here takes both forms.
 - **A BEVE document you have no type for.** `beve_to_json(&bytes)` rewrites it as JSON in one walk, with no tree and no schema, which is the answer to "what is actually in this file".
 - **Complex numbers and matrices.** `Complex<T>` and `Matrix<T>` cover BEVE's two data-carrying extensions, in both formats. A `Vec<Complex<f64>>` is one header and one block, so it moves in a single copy exactly as a `Vec<f64>` does.
-- **Errors carry a byte offset**, and `Error::display_with(input)` renders it with a line, column, and caret.
+- **Errors carry a byte offset**, and `Error::display_with(input)` renders it with a line, column, and caret. A missing key also names itself, the offset there being able to point only at the object that lacks it.
 
 ## API
 

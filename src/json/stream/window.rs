@@ -40,7 +40,7 @@ pub(crate) fn parse_into<'a, O: Options, T: Read<'a>>(
     value: &mut T,
 ) -> Result<(), StreamError> {
     let text = core::str::from_utf8(&win.bytes()[start..end])
-        .map_err(|e| win.error_at(ErrorCode::InvalidUtf8, start + e.valid_up_to()))?;
+        .map_err(|e| win.error_at(ErrorCode::InvalidUtf8, start + e.valid_up_to(), None))?;
 
     // Every span starts on a non-whitespace byte: the scanned modes skip
     // whitespace before the scan begins, and `Lines` trims its span at both
@@ -48,6 +48,6 @@ pub(crate) fn parse_into<'a, O: Options, T: Read<'a>>(
     let mut p = Parser::<O>::with_options(text);
     match p.read(value).and_then(|()| p.finish()) {
         Ok(()) => Ok(()),
-        Err(code) => Err(win.error_at(code, start + p.position())),
+        Err(code) => Err(win.error_at(code, start + p.position(), p.error_key())),
     }
 }

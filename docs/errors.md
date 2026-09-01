@@ -1,11 +1,12 @@
 # Errors
 
-Every failure is an `Error`: a one-byte `code` and the `index` where it was detected.
+Every failure is an `Error`: a one-byte `code`, the `index` where it was detected, and the `key` it is about where the crate knows one.
 
 ```rust
 pub struct Error {
     pub code: ErrorCode,
     pub index: usize,
+    pub key: Option<&'static str>,
 }
 ```
 
@@ -13,9 +14,58 @@ One `Error` covers both formats, and it does not record which one it came from. 
 
 The offset is a byte offset into the input you passed. It is attached once, at the public entry point, from the cursor position at the moment the parse stopped. Inside the hot paths only the bare `ErrorCode` travels, so `Result<(), ErrorCode>` stays register sized and `?` costs a test and a branch.
 
+**The offset indexes a buffer you must still be holding.** It is a position, not a copy of anything, so an `Error` that outlives its document knows an offset into a string nobody has any more. That is the normal shape when a parse happens behind an API that returns a domain error: the buffer goes out of scope at the end of the function and the offset goes with it. Render at the parse site with `display_with` and carry the `String`, or keep the input alive as long as the error. The `key` below is the part that stays meaningful either way.
+
+## The key
+
+The offset answers *where*. Read next to `display_with` that is usually the whole answer, because the caret lands on the byte that was wrong. There is one code where it cannot be: a member that is not in the document has no position of its own, so the cursor is wound back to the enclosing object and the offset names the object. `key` names the member.
+
+```rust
+#[derive(Debug, Default)]
+struct Accessor { byte_offset: u32, component_type: u32 }
+
+structio::object!(Accessor as "camelCase" {
+    #[required] byte_offset,
+    #[required] "type" => component_type,
+});
+
+let e = structio::from_str::<Accessor>(r#"{"type":5}"#).unwrap_err();
+assert_eq!(e.code, ErrorCode::MissingKey);
+assert_eq!(e.key, Some("byteOffset"));
+assert_eq!(e.to_string(), r#"missing object key "byteOffset" at byte 0"#);
+```
+
+It is the key the *document* uses, not the Rust field: a renamed key reports its rename and a converted one reports its conversion, because that is the spelling a person comparing the error against the document will find. Where several required members are absent it names the first in declaration order.
+
+This matters most in BEVE, where there is no text to draw a caret against and `display_with` has nothing to render. `missing object key "byteOffset"` is most of a diagnostic; `at byte 21947` into a binary document is close to none.
+
+Every other code leaves `key` as `None`. In particular `UnknownKey` and `UnknownVariant` do, and lose nothing by it: the cursor is already wound back to the offending name, so the offset points straight at it and a copy in the error would say the same thing twice.
+
+`Option` rather than an empty string, which would cost nothing either way — the two are the same 32 bytes, the reference being niche-packed — and would conflate two different answers. An empty key is legal JSON, so `#[required] "" => field` is a schema whose absent key really is named `""`, and `Some("")` says that where `""` alone could not.
+
+`&'static str`, so `Error` still carries no lifetime, stays `Copy`, and outlives the document. Everything nameable here is a constant of the destination type rather than a run of input bytes, which is what makes that possible.
+
+### From a hand-written reader
+
+A `Read` impl that tracks its own keys has the same problem and sets its own name, on the branch that is failing:
+
+```rust
+if !seen_hi {
+    p.rewind(open);
+    p.set_error_key("hi");
+    return Err(ErrorCode::MissingKey);
+}
+```
+
+`Parser::set_error_key` and `Reader::set_error_key` take `&'static str` only. A key read out of the input does not qualify and does not need to: rewind to it instead, which is what the unknown-key path does.
+
+**Set it after any `rewind`, on the branch that returns `Err`.** A successful read does not clear the key, because clearing would mean a store on every object read. What clears it is `rewind`.
+
+That is the whole rule, and it is on `rewind` rather than on the reader that discards a read for a reason. A reader speculating on a *generated* type never sets a key itself: `read_object` sets one behind its back, so "clear the key you set" would be a rule nobody could follow, since the reader has no idea a key is there. Winding back is the operation such a reader already has to perform, so that is what drops it.
+
 ## Showing an error to a person
 
-`display_with` renders the failure against the input, with a line, a column, and a caret under the offending byte:
+`display_with` renders the failure against the input, with the name where there is one, a line, a column, and a caret under the offending byte:
 
 ```rust
 match structio::from_str::<Config>(text) {
@@ -26,7 +76,7 @@ match structio::from_str::<Config>(text) {
 
 Long lines are trimmed around the caret so the output stays readable. The input you hand it need not be the document that produced the error; a diagnostic helper that panicked would be worse than useless, so an index that lands inside a multi-byte character is rounded down to a boundary rather than slicing through it.
 
-`Error` also implements `Display` on its own, without the input, and `std::error::Error`.
+`Error` also implements `Display` on its own, without the input, and `std::error::Error`. Both messages open with the same description of what went wrong and what it was about, and differ only in how they locate it: `Display` says `at byte 12`, `display_with` says `at line 2, column 3` and draws the caret.
 
 ## Codes
 
@@ -65,7 +115,7 @@ Long lines are trimmed around the caret so the output stays readable. The input 
 | `ArrayLengthMismatch` | A fixed-size target (`[T; N]`, a tuple) did not match the input's length. |
 | `ExpectedSingleChar` | A `char` was requested but the string was not exactly one scalar value. |
 | `UnknownKey` | An object held a key no field of the destination claims. Read with [`SkipUnknown`](options.md#error_on_unknown_keys) to step over it instead. |
-| `MissingKey` | An object left out a field the destination declares, under [`RequireKeys`](options.md#error_on_missing_keys). Off by default, absence otherwise meaning the destination keeps what it held. |
+| `MissingKey` | An object left out a field the destination declares, under [`RequireKeys`](options.md#error_on_missing_keys) or `#[required]`. Off by default, absence otherwise meaning the destination keeps what it held. The offset is the object's first byte, and `key` is the absent one. |
 | `UnknownVariant` | An enum's tag named no variant the destination declares. Refused under every policy, `SkipUnknown` included: a member with nowhere to go can be stepped over and the object still read, but a variant with nowhere to go leaves the value itself undecided. |
 | `InvalidMatrixLayout` | A matrix named a storage order that is not one of the two defined. |
 | `InvalidMatrixShape` | A matrix held a different number of elements than its extents describe. Also what `Matrix::new` and `MatrixRef::new` return, which is why `ErrorCode` implements `std::error::Error`: a value assembled in memory has no byte offset to locate it at. |

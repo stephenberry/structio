@@ -94,6 +94,9 @@ pub struct Reader<'de, O: Options = Standard> {
     data: &'de [u8],
     pos: usize,
     depth: u32,
+    /// The key to attach to the failure this read is about to return. See
+    /// [`set_error_key`](Reader::set_error_key).
+    error_key: Option<&'static str>,
     /// The header the next value must be read with, when it carries none of
     /// its own. See the module docs.
     implied: Option<u8>,
@@ -137,6 +140,7 @@ impl<'de, O: Options> Reader<'de, O> {
             data,
             pos: 0,
             depth: 0,
+            error_key: None,
             implied: None,
             options: PhantomData,
         }
@@ -156,6 +160,7 @@ impl<'de, O: Options> Reader<'de, O> {
             data,
             pos: 0,
             depth: 0,
+            error_key: None,
             implied: Some(implied),
             options: PhantomData,
         }
@@ -165,6 +170,27 @@ impl<'de, O: Options> Reader<'de, O> {
     #[inline]
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    /// The key set for the failure being returned, if there is one.
+    ///
+    /// [`json::Parser::error_key`](crate::json::Parser::error_key)'s
+    /// counterpart, and worth more here: a byte offset into a binary document
+    /// is not something a person can read a document against, so for BEVE the
+    /// key is often the whole of the diagnostic.
+    #[inline]
+    pub fn error_key(&self) -> Option<&'static str> {
+        self.error_key
+    }
+
+    /// Name the key the failure about to be returned is about.
+    ///
+    /// See [`json::Parser::set_error_key`](crate::json::Parser::set_error_key),
+    /// which this mirrors, including the rule about setting it after any
+    /// [`rewind`](Self::rewind) and on the branch that is returning `Err`.
+    #[inline]
+    pub fn set_error_key(&mut self, key: &'static str) {
+        self.error_key = Some(key);
     }
 
     /// Move the cursor back to a position it has already passed.
@@ -199,11 +225,14 @@ impl<'de, O: Options> Reader<'de, O> {
     /// r.rewind(doc.len());
     /// assert_eq!(r.position(), start);
     /// ```
+    /// Any key [`set_error_key`](Self::set_error_key) left is dropped, for
+    /// the reason [`json::Parser::rewind`](crate::json::Parser::rewind) gives.
     #[inline]
     pub fn rewind(&mut self, to: usize) {
         // Clamping is also what keeps `pos <= data.len()`, which every bounds
         // test in here is written against.
         self.pos = to.min(self.pos);
+        self.error_key = None;
     }
 
     /// Confirm the document ended where the value did.
@@ -681,7 +710,10 @@ impl<'de, O: Options> Reader<'de, O> {
         if seen & mask != mask {
             // Back to the object's header: the cursor is past the object by
             // now, and what is incomplete is the object, not what follows it.
+            // The offset can therefore only name the object, so the key of the
+            // member it lacks is carried alongside it.
             self.pos = open;
+            self.error_key = Fields::<O, T>::missing(seen);
             return Err(ErrorCode::MissingKey);
         }
         Ok(())
@@ -987,10 +1019,14 @@ impl<'de, O: Options> Reader<'de, O> {
     ///
     /// The cursor is put back on the way to `false` rather than trusted to
     /// have stayed put, so an adapter that consumes and then declines is
-    /// corrected instead of believed. What is not put back is the implied
-    /// element header and the depth, which no correct implementation moves:
-    /// both are restored by the walks that set them, and only a `read_bulk`
-    /// that swallowed an error could return here with either disturbed.
+    /// corrected instead of believed. It goes back through
+    /// [`rewind`](Self::rewind), which drops any error key the declined
+    /// attempt left, for the same reason: a hook that swallowed a failed read
+    /// of a generated type is holding a key it did not set. What is not put
+    /// back is the implied element header and the depth, which no correct
+    /// implementation moves: both are restored by the walks that set them, and
+    /// only a `read_bulk` that swallowed an error could return here with
+    /// either disturbed.
     ///
     /// [`Self::write_slice_with`]: crate::beve::Writer::write_slice_with
     pub fn try_bulk_with<A: ReadAs<'de, T>, T>(&mut self, out: &mut Vec<T>) -> PResult<bool> {
@@ -1000,7 +1036,7 @@ impl<'de, O: Options> Reader<'de, O> {
         {
             return Ok(true);
         }
-        self.pos = start;
+        self.rewind(start);
         Ok(false)
     }
 
@@ -1091,7 +1127,7 @@ impl<'de, O: Options> Reader<'de, O> {
         match self.borrow_block() {
             Some(block) => Some(block),
             None => {
-                self.pos = start;
+                self.rewind(start);
                 None
             }
         }

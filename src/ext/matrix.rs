@@ -297,12 +297,24 @@ const SEEN_EXTENTS: u8 = 2;
 const SEEN_VALUE: u8 = 4;
 const SEEN_ALL: u8 = SEEN_LAYOUT | SEEN_EXTENTS | SEEN_VALUE;
 
-/// Refuse an object form that named fewer than all three members.
-fn require_members<O: Options>(seen: u8) -> PResult<()> {
-    if O::ERROR_ON_MISSING_KEYS && seen != SEEN_ALL {
-        return Err(ErrorCode::MissingKey);
+/// The first of the three members an object form left out, where the policy
+/// asks for all three, and `None` where nothing is owed.
+///
+/// The offset can only point at the object, a member that is not there having
+/// no position of its own, so the name goes alongside it exactly as a
+/// generated reader's does. Declaration order, matching `Fields::missing`, so
+/// an `object!` of these same three keys would say the same thing.
+fn missing_member<O: Options>(seen: u8) -> Option<&'static str> {
+    if !O::ERROR_ON_MISSING_KEYS || seen == SEEN_ALL {
+        return None;
     }
-    Ok(())
+    Some(if seen & SEEN_LAYOUT == 0 {
+        LAYOUT
+    } else if seen & SEEN_EXTENTS == 0 {
+        EXTENTS
+    } else {
+        VALUE
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -424,12 +436,19 @@ where
                 }
                 // A member this shape does not name. Three keys is still a
                 // schema, so this is an unknown key like any other and the
-                // policy decides, by hand here for the reason `require_members`
+                // policy decides, by hand here for the reason `missing_member`
                 // gives.
                 _ if O::ERROR_ON_UNKNOWN_KEYS => Err(ErrorCode::UnknownKey),
                 _ => r.skip_value(),
             })?;
-            require_members::<O>(seen).inspect_err(|_| r.rewind(open))
+            match missing_member::<O>(seen) {
+                None => Ok(()),
+                Some(key) => {
+                    r.rewind(open);
+                    r.set_error_key(key);
+                    Err(ErrorCode::MissingKey)
+                }
+            }
         }
         Some(_) => Err(ErrorCode::ExpectedMatrix),
         None => Err(ErrorCode::UnexpectedEnd),
@@ -506,7 +525,14 @@ where
         _ if O::ERROR_ON_UNKNOWN_KEYS => Err(ErrorCode::UnknownKey),
         _ => p.skip_value(),
     });
-    let outcome = outcome.and_then(|()| require_members::<O>(seen).inspect_err(|_| p.rewind(open)));
+    let outcome = outcome.and_then(|()| match missing_member::<O>(seen) {
+        None => Ok(()),
+        Some(key) => {
+            p.rewind(open);
+            p.set_error_key(key);
+            Err(ErrorCode::MissingKey)
+        }
+    });
     commit_shape(m, outcome)
 }
 

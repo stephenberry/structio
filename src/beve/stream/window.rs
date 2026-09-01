@@ -45,6 +45,6 @@ pub(crate) fn read_into<'a, O: Options, T: Read<'a>>(
     };
     match value.read(&mut r).and_then(|()| r.finish()) {
         Ok(()) => Ok(()),
-        Err(code) => Err(win.error_at(code, start + r.position())),
+        Err(code) => Err(win.error_at(code, start + r.position(), r.error_key())),
     }
 }

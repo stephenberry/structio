@@ -155,7 +155,7 @@ where
     let mut r = Reader::<O>::with_options(input);
     match value.read(&mut r).and_then(|()| r.finish()) {
         Ok(()) => Ok(()),
-        Err(code) => Err(Error::new(code, r.position())),
+        Err(code) => Err(Error::with_key(code, r.position(), r.error_key())),
     }
 }
 
@@ -246,7 +246,7 @@ where
     let mut r = Reader::<O>::with_options(input);
     match r.seek(pointer).and_then(|()| value.read(&mut r)) {
         Ok(()) => Ok(()),
-        Err(code) => Err(Error::new(code, r.position())),
+        Err(code) => Err(Error::with_key(code, r.position(), r.error_key())),
     }
 }
 

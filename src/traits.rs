@@ -131,6 +131,21 @@ impl<O: Options, T: Keys> Fields<O, T> {
     /// admits.
     const NARROW: bool = T::MAP.n as usize <= 64;
 
+    /// The first key the mask asked for that `seen` does not hold.
+    ///
+    /// Which of several absent members it names is the declaration order,
+    /// which is stable and is where a person reading the schema would look.
+    ///
+    /// `get` rather than an index, and so `None` rather than a panic, because
+    /// [`Keys`] is a public trait and a hand-written impl may set a
+    /// [`REQUIRED`](Keys::REQUIRED) bit past the end of its own
+    /// [`KEYS`](Keys::KEYS): an unsatisfiable schema, which its own
+    /// documentation allows, but not a reason for a diagnostic to panic.
+    pub(crate) fn missing(seen: u64) -> Option<&'static str> {
+        let i = (Self::MASK & !seen).trailing_zeros() as usize;
+        T::KEYS.get(i).copied()
+    }
+
     /// Bit `index` of the seen mask, or nothing for a field the mask has no
     /// room for.
     ///

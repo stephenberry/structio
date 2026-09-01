@@ -5,7 +5,7 @@
 //! The byte offset is attached once, at the public entry point, from the
 //! cursor position at the moment the parse stopped.
 
-use core::fmt;
+use core::fmt::{self, Write as _};
 
 /// What went wrong. One byte, so error propagation stays cheap.
 ///
@@ -212,23 +212,122 @@ impl fmt::Display for ErrorCode {
 impl std::error::Error for ErrorCode {}
 
 /// A parse or serialization failure, located within the input.
+///
+/// The location is an *offset*, not a copy of anything: it indexes the buffer
+/// you handed the parser, and it means nothing once that buffer is gone. A
+/// caller that converts this into its own error type and drops the input
+/// should render it first, with [`display_with`](Self::display_with), and
+/// carry the `String`. See [`docs/errors.md`] for the shape that has.
+///
+/// [`docs/errors.md`]: https://github.com/stephenberry/structio/blob/main/docs/errors.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error {
     /// What went wrong.
     pub code: ErrorCode,
     /// Byte offset into the input where the failure was detected.
     pub index: usize,
+    /// The key the code is about, where the crate knows one, and `None` where
+    /// it does not.
+    ///
+    /// The offset answers "where", and for a text document read next to
+    /// [`display_with`](Self::display_with) that is usually the whole answer.
+    /// It is a poor answer for a member that is *not in the document*, which
+    /// has no position of its own, and a thin answer for BEVE, a byte offset
+    /// into a binary document being nearly unreadable. So the one code that
+    /// fills this in is [`MissingKey`](ErrorCode::MissingKey), whose offset is
+    /// the enclosing object's first byte and whose name is the absent key.
+    ///
+    /// Every other code leaves it empty, [`UnknownKey`](ErrorCode::UnknownKey)
+    /// and [`UnknownVariant`](ErrorCode::UnknownVariant) included: the cursor
+    /// is already wound back to the offending name, so the offset points at it
+    /// and a copy here would say the same thing twice.
+    ///
+    /// `&'static str`, so an `Error` still outlives the document and stays
+    /// `Copy`. Everything nameable here is a constant of the destination type
+    /// rather than a run of input bytes, which is what makes that possible.
+    ///
+    /// [`Option`] rather than an empty string, which would cost nothing here
+    /// -- the two are the same 32 bytes, the reference being niche-packed --
+    /// and would conflate two different answers. An empty key is legal JSON,
+    /// so `#[required] "" => field` is a schema whose missing key really is
+    /// named `""`, and `Some("")` says that where `""` alone could not.
+    ///
+    /// A hand-written reader sets it with [`json::Parser::set_error_key`] or
+    /// [`beve::Reader::set_error_key`].
+    ///
+    /// ```
+    /// use structio::ErrorCode;
+    ///
+    /// #[derive(Debug, Default)]
+    /// struct Accessor { byte_offset: u32, component_type: u32 }
+    ///
+    /// structio::object!(Accessor as "camelCase" {
+    ///     #[required] byte_offset,
+    ///     #[required] "type" => component_type,
+    /// });
+    ///
+    /// let e = structio::from_str::<Accessor>(r#"{"type":5}"#).unwrap_err();
+    /// assert_eq!(e.code, ErrorCode::MissingKey);
+    /// // The key the document uses, not the Rust field.
+    /// assert_eq!(e.key, Some("byteOffset"));
+    /// // And the offset is the object, which is all an absent member has.
+    /// assert_eq!(e.to_string(), r#"missing object key "byteOffset" at byte 0"#);
+    /// ```
+    ///
+    /// [`json::Parser::set_error_key`]: crate::json::Parser::set_error_key
+    /// [`beve::Reader::set_error_key`]: crate::beve::Reader::set_error_key
+    pub key: Option<&'static str>,
 }
 
 impl Error {
+    /// A failure at an offset, about no key in particular.
     #[inline]
     pub const fn new(code: ErrorCode, index: usize) -> Self {
-        Self { code, index }
+        Self {
+            code,
+            index,
+            key: None,
+        }
+    }
+
+    /// A failure at an offset, about a key the reader named.
+    ///
+    /// [`Option`] rather than `&'static str`, because this is what an entry
+    /// point composes with [`json::Parser::error_key`] and its BEVE twin,
+    /// which have a key only sometimes. See [`key`](Self::key).
+    ///
+    /// [`json::Parser::error_key`]: crate::json::Parser::error_key
+    #[inline]
+    pub const fn with_key(code: ErrorCode, index: usize, key: Option<&'static str>) -> Self {
+        Self { code, index, key }
+    }
+
+    /// What went wrong and what it was about, which is the half of a message
+    /// that does not depend on where in the document it happened.
+    ///
+    /// Shared, so [`Display`](fmt::Display) and
+    /// [`display_with`](Self::display_with) cannot come to describe the same
+    /// error differently. `{:?}` quotes the key, which marks where it begins
+    /// and ends.
+    ///
+    /// `dyn` rather than a generic: this is a diagnostic, so one indirect call
+    /// is beneath notice and one copy of the code is worth having.
+    fn described(&self, f: &mut dyn fmt::Write) -> fmt::Result {
+        f.write_str(self.code.message())?;
+        match self.key {
+            None => Ok(()),
+            Some(key) => write!(f, " {key:?}"),
+        }
     }
 
     /// Render the failure with the surrounding input, for diagnostics.
     ///
-    /// Shows the line and column plus a caret under the offending byte.
+    /// Shows the line and column plus a caret under the offending byte, and
+    /// the [`key`](Self::key) where there is one.
+    ///
+    /// The input is the one the offset indexes. Hand it a different document
+    /// and you get a caret under an unrelated byte, which is why this is worth
+    /// calling at the parse site rather than remembering the offset for later.
     pub fn display_with(&self, input: &str) -> String {
         // `input` is caller-supplied and need not be the document that produced
         // this error, so the index may land inside a character. A diagnostic
@@ -259,8 +358,10 @@ impl Error {
         let caret_col = shown[..caret_col].chars().count();
 
         let mut out = String::new();
-        out.push_str(self.code.message());
-        out.push_str(&format!(" at line {line_no}, column {col_no}\n"));
+        // `write!` into a `String` cannot fail, and a diagnostic helper is the
+        // last place to propagate an error from.
+        let _ = self.described(&mut out);
+        let _ = writeln!(out, " at line {line_no}, column {col_no}");
         if elided_left {
             out.push_str("...");
         }
@@ -294,7 +395,8 @@ fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} at byte {}", self.code.message(), self.index)
+        self.described(f)?;
+        write!(f, " at byte {}", self.index)
     }
 }
 

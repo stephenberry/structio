@@ -6,12 +6,17 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ## [Unreleased]
 
+### Changed
+
+- `Error` gained a public field, so a struct literal or exhaustive `match` over it needs updating, and a `MissingKey` no longer compares equal to one built without a name. `ErrorCode` is untouched and the parser still propagates it alone.
+
 ### Fixed
 
 - A declaration that names the same key or variant twice is a compile error even when the type is generic and never read. The check is in the key hash, which only reading used to reach.
 
 ### Added
 
+- **A missing key names itself.** `Error` carries a third field, `key: Option<&'static str>`, holding the key a `MissingKey` is about. The offset for that code can only point at the enclosing object, so it never said which member was absent; it does now, in both messages. Every other code leaves it `None`. `Error` stays `Copy` and allocation-free. Hand-written readers set one with `Parser::set_error_key` / `Reader::set_error_key`, and `rewind` clears it.
 - **Case rules.** `object!`, `unit_enum!`, `tagged_enum!` and their `json_`/`beve_` variants take one after the type, as in `object!(Root as "camelCase" { .. })`, and convert every key the declaration does not spell out. The eight `serde` spellings are accepted, an explicit `"key" => field` still wins, and the conversion happens during compilation, so the bytes match the same declaration with every key written out. The rule differs from serde's in three ways worth checking before porting a schema; see [docs/schemas.md](docs/schemas.md#case-rules).
 - `Parser::read_number_str` and `Writer::write_number_str`: a number's text, borrowed and written verbatim, for a fixed-point, decimal, bignum, or rational type. JSON only.
 

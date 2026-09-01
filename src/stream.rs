@@ -210,7 +210,7 @@ impl<F: Framer> Window<F> {
         let split = self
             .split
             .next(&self.buf, self.eof)
-            .map_err(|code| self.error_at(code, self.split.position()))?;
+            .map_err(|code| self.error_at(code, self.split.position(), None))?;
         // The limit is on one value's extent, however its bytes arrived. A
         // starved framer is holding a partial value, so the whole live window
         // is it; a located one states its own size. Both report the offset of
@@ -221,7 +221,7 @@ impl<F: Framer> Window<F> {
             Split::End => (0, self.split.consumed()),
         };
         if extent > self.limit {
-            return Err(self.error_at(ErrorCode::DocumentTooLarge, at));
+            return Err(self.error_at(ErrorCode::DocumentTooLarge, at, None));
         }
         Ok(split)
     }
@@ -273,7 +273,16 @@ impl<F: Framer> Window<F> {
     }
 
     /// Locate `code` at a window offset, reported against the whole stream.
-    pub(crate) fn error_at(&self, code: ErrorCode, at: usize) -> StreamError {
-        StreamError::Parse(Error::new(code, self.origin + at))
+    ///
+    /// `key` is the parser's, for a failure that has one to go with the
+    /// offset, and `None` for the framing failures raised here, which happen
+    /// before any value is read and so are about no key in particular.
+    pub(crate) fn error_at(
+        &self,
+        code: ErrorCode,
+        at: usize,
+        key: Option<&'static str>,
+    ) -> StreamError {
+        StreamError::Parse(Error::with_key(code, self.origin + at, key))
     }
 }

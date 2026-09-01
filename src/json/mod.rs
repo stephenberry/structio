@@ -101,7 +101,7 @@ where
     p.skip_ws();
     match value.read(&mut p).and_then(|()| p.finish()) {
         Ok(()) => Ok(()),
-        Err(code) => Err(Error::new(code, p.position())),
+        Err(code) => Err(Error::with_key(code, p.position(), p.error_key())),
     }
 }
 

@@ -33,6 +33,9 @@ pub struct Parser<'de, O: Options = Standard> {
     data: &'de [u8],
     idx: usize,
     depth: u32,
+    /// The key to attach to the failure this parse is about to return. See
+    /// [`set_error_key`](Parser::set_error_key).
+    error_key: Option<&'static str>,
     /// `fn() -> O` rather than `O`, so the parser's auto traits follow what it
     /// actually holds rather than a policy type it never contains.
     options: PhantomData<fn() -> O>,
@@ -80,6 +83,7 @@ impl<'de, O: Options> Parser<'de, O> {
             data: input.as_bytes(),
             idx: 0,
             depth: 0,
+            error_key: None,
             options: PhantomData,
         }
     }
@@ -88,6 +92,48 @@ impl<'de, O: Options> Parser<'de, O> {
     #[inline(always)]
     pub fn position(&self) -> usize {
         self.idx
+    }
+
+    /// The key set for the failure being returned, if there is one.
+    ///
+    /// The companion of [`position`](Self::position): where that says which
+    /// byte, this says which key. An entry point reads both when a read comes
+    /// back `Err`, and they become [`Error::index`] and [`Error::key`].
+    ///
+    /// [`Error::index`]: crate::Error::index
+    /// [`Error::key`]: crate::Error::key
+    #[inline(always)]
+    pub fn error_key(&self) -> Option<&'static str> {
+        self.error_key
+    }
+
+    /// Name the key the failure about to be returned is about.
+    ///
+    /// The counterpart of [`rewind`](Self::rewind) for a hand-written [`Read`]
+    /// impl, and for the same case: a reader that discovers at the end of an
+    /// object that a member never arrived wants to name the object *and* to
+    /// name the member, the offset alone being able to do only the first. This
+    /// is what [`read_object`](Self::read_object) does for
+    /// [`ErrorCode::MissingKey`], and what [`Matrix`](crate::Matrix) does by
+    /// hand.
+    ///
+    /// **Set it after any [`rewind`](Self::rewind), on the branch that is
+    /// returning `Err`.** A successful read does not clear the key, because
+    /// clearing would mean a store on every object read; what clears it is
+    /// [`rewind`](Self::rewind), which is how a reader abandons a read it is
+    /// discarding. Setting a key and then winding back loses it, and that is
+    /// the right way round.
+    ///
+    /// Only [`&'static str`](str) goes here, so an
+    /// [`Error`](crate::Error) still outlives the document. A name read out of
+    /// the input does not qualify, and does not need to: the cursor can be
+    /// wound back to it instead, which is what the unknown-key and
+    /// unknown-variant paths do.
+    ///
+    /// [`ErrorCode::MissingKey`]: crate::ErrorCode::MissingKey
+    #[inline(always)]
+    pub fn set_error_key(&mut self, key: &'static str) {
+        self.error_key = Some(key);
     }
 
     /// Move the cursor back to a position it has already passed.
@@ -121,11 +167,19 @@ impl<'de, O: Options> Parser<'de, O> {
     /// p.rewind(4);
     /// assert_eq!(p.position(), open);
     /// ```
+    /// Any key [`set_error_key`](Self::set_error_key) left is dropped,
+    /// whoever set it. Winding back is how a reader abandons what it just
+    /// read, and the key is part of what it read: a speculating reader that
+    /// discards a failed read of a *generated* type would otherwise carry off
+    /// a key the generated reader set behind its back, and have no way to know
+    /// it was there. So the abandoning is what clears it, rather than a rule
+    /// the abandoning reader has to remember.
     #[inline]
     pub fn rewind(&mut self, to: usize) {
         // Clamping is also what keeps `idx <= data.len()`, which every bounds
         // test in here is written against.
         self.idx = to.min(self.idx);
+        self.error_key = None;
     }
 
     /// Remaining input, starting at the cursor.
@@ -328,8 +382,11 @@ impl<'de, O: Options> Parser<'de, O> {
         let mask = Fields::<O, T>::MASK;
         if seen & mask != mask {
             // Back to the opening brace: the cursor is past the object by now,
-            // and what is incomplete is the object, not the byte after it.
+            // and what is incomplete is the object, not the byte after it. The
+            // offset can therefore only name the object, so the key of the
+            // member it lacks is carried alongside it.
             self.idx = open;
+            self.error_key = Fields::<O, T>::missing(seen);
             return Err(ErrorCode::MissingKey);
         }
         Ok(())
