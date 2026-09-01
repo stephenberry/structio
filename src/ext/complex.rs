@@ -22,7 +22,7 @@
 
 use crate::beve;
 use crate::beve::header;
-use crate::beve::impls::{NumericBytes, read_le_block, sealed, write_le_block};
+use crate::beve::impls::NumericBytes;
 use crate::error::{ErrorCode, PResult};
 use crate::json;
 use crate::options::Options;
@@ -167,8 +167,6 @@ macro_rules! impl_complex {
             assert!(align_of::<Complex<$t>>() == align_of::<$t>());
         };
 
-        impl sealed::Sealed for Complex<$t> {}
-
         // SAFETY: two fields of a type that has no padding and whose every bit
         // pattern is a value leave no padding between or after them and add no
         // invalid pattern of their own, which the assertions above confirm at
@@ -199,7 +197,8 @@ macro_rules! impl_complex {
                 }
                 // The tag test is the half of the contract the bound does not
                 // cover: it establishes that the stored class is this one.
-                read_le_block(out, n, r)
+                r.read_block(out, n)?;
+                Ok(true)
             }
         }
 
@@ -217,7 +216,7 @@ macro_rules! impl_complex {
 
             fn write_payload<O: Options>(items: &[Self], w: &mut beve::Writer<'_, O>) {
                 if cfg!(target_endian = "little") {
-                    write_le_block(items, w)
+                    w.write_block(items)
                 } else {
                     for z in items {
                         w.raw(&z.re.to_le_bytes());

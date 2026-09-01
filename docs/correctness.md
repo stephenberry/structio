@@ -96,12 +96,14 @@ Two things about it are asserted because a correct-looking value would hide them
 
 ## Unsafe code
 
-There is a small amount, and all of it is checked under **Miri with strict provenance**. What may be reinterpreted as bytes, and back, is not prose: it is the `NumericBytes` bound, a sealed unsafe trait carried by the fixed-width numbers and by `Complex` of one. See [design.md](design.md#three-soundness-notes).
+There is a small amount, and all of it is checked under **Miri with strict provenance**. What may be reinterpreted as bytes, and back, is not prose: it is the `NumericBytes` bound, an unsafe trait carried by the fixed-width numbers and by `Complex` of one. See [design.md](design.md#three-soundness-notes).
+
+That trait is implementable from outside the crate, which is what lets an adapter over a foreign scalar reach the same block paths, so the obligation it carries is checked from outside too: `tests/blocks.rs` implements it for a `#[repr(transparent)]` newtype and runs the whole adapter through Miri. One of its four clauses does not need Miri at all -- that an element is the width its declared header names is a constant of a generic type, so an impl that disagrees is a build error rather than a silent misparse, reported when the crate is *built* rather than by `cargo check`.
 
 The blocks themselves:
 
 - The writers' spare-capacity trick, writing into uninitialized capacity and then setting the length, over the whole test suite including every drain size.
-- BEVE's bulk array copies, at all twelve integer and float widths, into both fresh and already-populated `Vec`s.
+- BEVE's bulk array copies, at all twelve integer and float widths, into both fresh and already-populated `Vec`s, and through an out-of-crate `NumericBytes` impl reached by an adapter.
 - The borrow that hands a block back as a `&[T]` pointing into the document, at every offset a document can land on. Miri is the check that matters most here, since it hands out allocations at exactly the alignment that was asked for where a real allocator gives more, so it is where a missing alignment test shows up rather than hides.
 - The key map's unaligned loads, over key sets constructed to force every one of the hash schemes.
 

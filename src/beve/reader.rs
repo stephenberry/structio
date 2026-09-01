@@ -43,8 +43,8 @@
 use core::marker::PhantomData;
 
 use crate::beve::header::{self, byte_width, decode_size};
-use crate::beve::impls::NumericBytes;
-use crate::beve::traits::{Read, ReadArray, ReadEnum, ReadObject};
+use crate::beve::impls::{Block, NumericBytes};
+use crate::beve::traits::{Read, ReadArray, ReadAs, ReadEnum, ReadObject};
 use crate::error::{ErrorCode, PResult};
 use crate::options::{Options, Standard};
 use crate::traits::Fields;
@@ -965,15 +965,87 @@ impl<'de, O: Options> Reader<'de, O> {
     /// Consumes nothing when it declines, so the caller falls through to the
     /// ordinary element-by-element path with the cursor untouched. This is the
     /// path that makes a `Vec<f64>` of a million samples a single `memcpy`.
+    ///
+    /// A type's own bulk read is the adapted one under
+    /// [`Same`](crate::Same), which forwards
+    /// [`ReadAs::read_bulk`] to [`Read::read_bulk`]. Saying so here rather
+    /// than writing the walk twice is what keeps the two from drifting on the
+    /// one thing they both promise: that declining puts the cursor back.
+    #[inline]
     pub fn try_bulk<T: Read<'de>>(&mut self, out: &mut Vec<T>) -> PResult<bool> {
+        self.try_bulk_with::<crate::Same, T>(out)
+    }
+
+    /// [`Self::try_bulk`] through an adapter, over [`ReadAs::read_bulk`]
+    /// rather than [`Read::read_bulk`].
+    ///
+    /// The reading half of [`Self::write_slice_with`]'s dispatch on
+    /// [`WriteAs::ARRAY`](crate::beve::WriteAs::ARRAY), and the reason an
+    /// adapted `Vec` is not stuck reading a block element by element. An
+    /// adapter that leaves the hook alone declines here, which is the same
+    /// answer `Vec<String>` gets from the unadapted form.
+    ///
+    /// The cursor is put back on the way to `false` rather than trusted to
+    /// have stayed put, so an adapter that consumes and then declines is
+    /// corrected instead of believed. What is not put back is the implied
+    /// element header and the depth, which no correct implementation moves:
+    /// both are restored by the walks that set them, and only a `read_bulk`
+    /// that swallowed an error could return here with either disturbed.
+    ///
+    /// [`Self::write_slice_with`]: crate::beve::Writer::write_slice_with
+    pub fn try_bulk_with<A: ReadAs<'de, T>, T>(&mut self, out: &mut Vec<T>) -> PResult<bool> {
         let start = self.pos;
         if let Some((elem, n)) = self.block_head()
-            && T::read_bulk(out, n, elem, self)?
+            && A::read_bulk(out, n, elem, self)?
         {
             return Ok(true);
         }
         self.pos = start;
         Ok(false)
+    }
+
+    /// Take `n` elements of payload into `out` in one copy, replacing whatever
+    /// it held.
+    ///
+    /// The copy behind [`Self::try_bulk`], for an implementation of
+    /// [`Read::read_bulk`] or [`ReadAs::read_bulk`] to call once it has
+    /// decided the block is one of these. The header and the count are already
+    /// consumed, so this is exactly `n * size_of::<T>()` bytes and nothing
+    /// else.
+    ///
+    /// # Correctness
+    ///
+    /// The [`NumericBytes`] bound covers the layout of `T`; it says nothing
+    /// about the document, and this checks nothing about it either. The caller
+    /// must have established both of the things that are not properties of
+    /// `T`: that the stored element type is
+    /// [`T::ELEMENT`](NumericBytes::ELEMENT), and that the host is little
+    /// endian.
+    ///
+    /// Neither is a soundness matter, which is why this is not `unsafe`: every
+    /// bit pattern of a `NumericBytes` type is a value, so the worst a wrong
+    /// call produces is a wrong answer. It is a silent one, though. Taking a
+    /// payload of some other width leaves the cursor inside the next value,
+    /// and the document reads on from there as if nothing had happened.
+    #[inline]
+    pub fn read_block<T: NumericBytes>(&mut self, out: &mut Vec<T>, n: usize) -> PResult<()> {
+        let total = n
+            .checked_mul(Block::<T>::WIDTH)
+            .ok_or(ErrorCode::UnexpectedEnd)?;
+        // Bounds-checked before anything is reserved, so a bogus count cannot
+        // make this allocate.
+        let bytes = self.take(total)?;
+        out.clear();
+        out.reserve(n);
+        // SAFETY: `clear` then `reserve(n)` gives room for `total` bytes at a
+        // pointer aligned for `T`, `bytes` is `total` bytes of a distinct
+        // borrow of the input, and by the bound those bytes are `n` values of
+        // `T`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr().cast::<u8>(), total);
+            out.set_len(n);
+        }
+        Ok(())
     }
 
     /// Borrow a whole typed numeric array out of the input, with no copy at
@@ -1035,7 +1107,7 @@ impl<'de, O: Options> Reader<'de, O> {
         if elem != T::ELEMENT {
             return None;
         }
-        let bytes = self.take(n.checked_mul(size_of::<T>())?).ok()?;
+        let bytes = self.take(n.checked_mul(Block::<T>::WIDTH)?).ok()?;
         let block = bytes.as_ptr().cast::<T>();
         if !block.is_aligned() {
             return None;
@@ -1096,9 +1168,8 @@ impl<'de, O: Options> Reader<'de, O> {
         // the input the same byte is an `InvalidHeader`, which is what the
         // `installed` test preserves.
         if installed && header::ty(h) == header::TY_UNDEFINED {
-            let width =
-                byte_width(header::sub(h), header::count(h)).ok_or(ErrorCode::InvalidHeader)?;
-            return self.drop_bytes(2 * width);
+            let width = header::element_width(h).ok_or(ErrorCode::InvalidHeader)?;
+            return self.drop_bytes(width);
         }
         self.skip_body::<UTF8>(h)
     }

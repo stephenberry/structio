@@ -225,13 +225,17 @@ impl_tuple_elements!(12; A, B, C, D, E, F, G, H, I, J, K, L);
 /// [`beve::WriteAs`](crate::beve::WriteAs) alike. A per-format `Same` could
 /// not be written at a field at all.
 ///
-/// It is an identity on the bytes too, not only on the values: `Same` forwards
-/// BEVE's [`Write::ARRAY`](crate::beve::Write::ARRAY), so a `Vec<Same>` over a
-/// `Vec<f64>` is still one typed array rather than a value per element.
+/// It is an identity on the bytes too, not only on the values, and in both
+/// directions: `Same` forwards BEVE's
+/// [`Write::ARRAY`](crate::beve::Write::ARRAY), so a `Vec<Same>` over a
+/// `Vec<f64>` is still one typed array rather than a value per element, and it
+/// forwards [`Read::read_bulk`](crate::beve::Read::read_bulk), so reading that
+/// array back is still the single `memcpy` the unadapted field would have got.
 ///
-/// Reading is the one place it is not free. BEVE's bulk read copies a whole
-/// typed array into a `Vec<T>` in a single `memcpy`, and it gets there by
-/// knowing the element type, which is what any adapter replaces. So an adapted
-/// `Vec` reads element by element even under `Same`, and a numeric field that
-/// wants that path should be left unadapted.
+/// Neither is true of an adapter in general, and neither should be. An adapter
+/// with a conversion to do has no block to copy, so it leaves both alone and
+/// gets a generic array and an element-by-element read. What `Same` shows is
+/// that the ceiling is the adapter's, not the mechanism's: an adapter over a
+/// type whose memory is already a payload can reach the same two paths, which
+/// is what [`NumericBytes`](crate::beve::NumericBytes) is implementable for.
 pub struct Same;

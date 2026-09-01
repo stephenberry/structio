@@ -54,8 +54,24 @@ pub trait Read<'de>: Sized {
     /// element, which is also what handles a stored width that differs from
     /// this type's.
     ///
-    /// Implementations must consume from `r` only when they return `true`.
-    #[doc(hidden)]
+    /// The header and the count are already consumed, so `n` and `elem` are
+    /// what they said and the reader is positioned on the payload. `elem` is
+    /// the *element's* header, not the array's, and comparing it against the
+    /// one this type carries is the half of the contract the caller cannot
+    /// check: a stored `f32` and a stored `f64` reach here alike.
+    ///
+    /// [`Reader::read_block`] is the copy itself, for a type whose memory is
+    /// already the payload. An implementation with a conversion to do has
+    /// nothing to gain here and should leave this alone.
+    ///
+    /// Implementations must consume from `r` only when they return `true`,
+    /// and must not turn one of its errors into `Ok(false)`. The caller puts
+    /// the cursor back, so an implementation that reads and then declines is
+    /// corrected rather than believed; what it does not put back is the
+    /// implied element header and the depth, which only a walk abandoned
+    /// part-way leaves disturbed.
+    ///
+    /// [`Reader::read_block`]: crate::beve::Reader::read_block
     fn read_bulk<O: Options>(
         _out: &mut Vec<Self>,
         _n: usize,
@@ -104,7 +120,12 @@ pub trait Write {
     /// saying what a component is. Nothing longer means anything. Every call
     /// site has this as a constant, so a one-byte prefix still lowers to a
     /// single store.
-    #[doc(hidden)]
+    ///
+    /// Leaving it `None` is never wrong: a run of values written one header
+    /// each is a document every reader accepts, and a larger one. Setting it
+    /// obliges [`write_payload`](Write::write_payload) to emit exactly what
+    /// the named array's payload is, which for a run of numbers is the
+    /// little-endian bytes of each element and nothing between them.
     const ARRAY: Option<&'static [u8]> = None;
 
     /// Append `items` as the payload of a typed array whose header and count
@@ -112,7 +133,22 @@ pub trait Write {
     ///
     /// Only reached when [`Write::ARRAY`] is `Some`, and it is a constant, so
     /// the call folds away entirely for the types that have no typed array.
-    #[doc(hidden)]
+    ///
+    /// The preamble is done: the header bytes, the count, and under
+    /// [`Writer::aligned`](crate::beve::Writer::aligned) the padding that
+    /// lands the payload on an address the element width divides. All that is
+    /// left is `items.len()` elements' worth of bytes, appended with nothing
+    /// between them. [`Writer::write_block`] is that copy for a type whose
+    /// memory is already the payload.
+    ///
+    /// # Panics
+    ///
+    /// The default body does, and says so: a type that names no array has no
+    /// payload to append, and the crate reaches here only through the `Some`
+    /// arm of the match on [`ARRAY`](Write::ARRAY). Overriding one without the
+    /// other is the mistake it exists to catch.
+    ///
+    /// [`Writer::write_block`]: crate::beve::Writer::write_block
     fn write_payload<O: Options>(items: &[Self], w: &mut Writer<'_, O>)
     where
         Self: Sized,
@@ -137,6 +173,32 @@ pub trait ReadAs<'de, T> {
     /// reused rather than replaced. Unlike [`ReadObject::read_field`] there is
     /// no way to decline: the member is already known to be this one.
     fn read<O: Options>(value: &mut T, r: &mut Reader<'de, O>) -> PResult<()>;
+
+    /// Fill `out` from the payload of a typed array of `n` elements whose
+    /// element header is `elem`, or return `false` to decline.
+    ///
+    /// [`Read::read_bulk`] moved onto the adapter, under the same contract in
+    /// full: the header and count are consumed, `elem` is the element's own
+    /// header and has to be checked, nothing may be taken from `r` except on
+    /// the way to returning `true`, and one of its errors may not be turned
+    /// into `Ok(false)`.
+    ///
+    /// It is the reading half of [`WriteAs::ARRAY`], and it exists for the
+    /// same reason. Without it an adapted sequence would give up the bulk path
+    /// even where the adapter changes nothing, which is why
+    /// [`Same`](crate::Same) forwards this exactly as it forwards `ARRAY`.
+    ///
+    /// Only [`Vec`] reaches here. It is the one sequence whose storage is a
+    /// block already, so it is the one a block can be copied into.
+    #[inline]
+    fn read_bulk<O: Options>(
+        _out: &mut Vec<T>,
+        _n: usize,
+        _elem: u8,
+        _r: &mut Reader<'de, O>,
+    ) -> PResult<bool> {
+        Ok(false)
+    }
 }
 
 /// How a field of type `T` is written when its declaration names this adapter.
@@ -171,7 +233,14 @@ pub trait WriteAs<T: ?Sized> {
     /// belong in, which is not an error but is a bigger document. It is why
     /// [`Same`](crate::Same) forwards `<T as Write>::ARRAY` and a `Vec<Same>`
     /// is byte-identical to the field it wraps.
-    #[doc(hidden)]
+    ///
+    /// This is how a scalar from a crate you do not own reaches the typed
+    /// array. `T` needs no impl of its own: the adapter names the array here
+    /// and fills it in [`write_payload`](WriteAs::write_payload), and both are
+    /// reached through [`Writer::write_slice_with`], which dispatches on this
+    /// constant rather than on [`Write::ARRAY`].
+    ///
+    /// [`Writer::write_slice_with`]: crate::beve::Writer::write_slice_with
     const ARRAY: Option<&'static [u8]> = None;
 
     /// Append `items` as the payload of a typed array whose header and count
@@ -179,7 +248,10 @@ pub trait WriteAs<T: ?Sized> {
     ///
     /// Only reached when [`WriteAs::ARRAY`] is `Some`, and it is a constant, so
     /// the call folds away entirely for an adapter that has no typed array.
-    #[doc(hidden)]
+    ///
+    /// The same contract as [`Write::write_payload`], against the array this
+    /// adapter named rather than the one the type would have, and the same
+    /// panic in the default body for an adapter that names none.
     fn write_payload<O: Options>(items: &[T], w: &mut Writer<'_, O>)
     where
         T: Sized,
@@ -313,7 +385,6 @@ pub trait WriteArray: Elements {
     /// the same thing: `Some` replaces a header per element with one header
     /// for the lot. A struct only has one when every field is the same type,
     /// which is what declaring it with an element type asserts.
-    #[doc(hidden)]
     const ARRAY: Option<&'static [u8]> = None;
 
     /// Append every element as the payload of a typed array whose header and
@@ -322,7 +393,10 @@ pub trait WriteArray: Elements {
     /// Only reached when [`WriteArray::ARRAY`] is `Some`, and it is a
     /// constant, so the call folds away entirely for a struct that has no
     /// typed array.
-    #[doc(hidden)]
+    ///
+    /// The same contract as [`Write::write_payload`]: the preamble is done,
+    /// what is left is [`LEN`](Elements::LEN) elements' worth of bytes, and
+    /// the default body panics for a struct that names no array.
     fn write_payload<O: Options>(&self, w: &mut Writer<'_, O>) {
         let _ = w;
         unreachable!("structio: a typed array without a payload writer")

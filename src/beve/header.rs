@@ -176,6 +176,31 @@ pub const fn element_of(array: u8) -> u8 {
     (array & 0b1111_1000) | TY_NUMBER
 }
 
+/// Bytes one element carrying `elem` occupies in a block's payload.
+///
+/// `elem` is an *element* header, which is either a [`number`]'s -- the form
+/// [`element_of`] produces for every numeric typed array -- or the synthetic
+/// one [`complex_element`] produces, where the same class and width fields
+/// describe a component and an element is two of them. `None` for anything
+/// else, a header with no width being one no block is measured by.
+///
+/// Internal, and shared by the three places that have to agree on it: the
+/// width a [`NumericBytes`](crate::beve::NumericBytes) type is pinned against,
+/// the stride the splitter cuts a block into, and the walk that steps over a
+/// complex element. A caller holding the components' width already, as the
+/// complex-array head parser does, doubles it rather than deriving it again.
+pub(crate) const fn element_width(elem: u8) -> Option<usize> {
+    let width = match byte_width(sub(elem), count(elem)) {
+        Some(width) => width,
+        None => return None,
+    };
+    match ty(elem) {
+        TY_NUMBER => Some(width),
+        TY_UNDEFINED => Some(2 * width),
+        _ => None,
+    }
+}
+
 /// The byte-count code for a `width`-byte value.
 ///
 /// The inverse of `1 << count`, which is the rule for every width this crate

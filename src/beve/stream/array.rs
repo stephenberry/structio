@@ -12,7 +12,7 @@
 use std::io;
 
 use crate::beve::header;
-use crate::beve::impls::NumericBytes;
+use crate::beve::impls::{Block, NumericBytes};
 use crate::error::{Error, ErrorCode, StreamError, StreamResult};
 
 /// Payload bytes taken per read.
@@ -133,7 +133,7 @@ where
     let mut src = Source { reader, pos: 0 };
     out.clear();
     let result = src.array_head::<T>().and_then(|n| {
-        src.payload(out, n, (CHUNK / size_of::<T>()).max(1))?;
+        src.payload(out, n, (CHUNK / Block::<T>::WIDTH).max(1))?;
         src.finish()
     });
     if result.is_err() {
@@ -291,7 +291,7 @@ impl<R: io::Read> Source<R> {
         n: usize,
         per: usize,
     ) -> StreamResult<()> {
-        let width = size_of::<T>();
+        let width = Block::<T>::WIDTH;
         while out.len() < n {
             let base = out.len();
             let end = n.min(base + per);

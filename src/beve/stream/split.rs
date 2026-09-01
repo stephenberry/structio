@@ -438,14 +438,17 @@ impl Splitter {
                 header::TY_TYPED_ARRAY => Ok(match r.typed_head(h)? {
                     Typed::Bools(n) => (n, Elem::Bools { bit: 0 }),
                     Typed::Strings(n) => (n, Elem::Strings),
-                    Typed::Fixed(elem, n) => (
-                        n,
-                        Elem::Fixed {
-                            implied: header::element_of(elem),
-                            width: byte_width(header::sub(elem), header::count(elem))
-                                .ok_or(ErrorCode::InvalidHeader)?,
-                        },
-                    ),
+                    Typed::Fixed(elem, n) => {
+                        let implied = header::element_of(elem);
+                        (
+                            n,
+                            Elem::Fixed {
+                                implied,
+                                width: header::element_width(implied)
+                                    .ok_or(ErrorCode::InvalidHeader)?,
+                            },
+                        )
+                    }
                 }),
                 // A complex array is a sequence too, and the synthetic
                 // element header is exactly the one byte `with_implied` wants,

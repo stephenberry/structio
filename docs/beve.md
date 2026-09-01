@@ -252,6 +252,50 @@ And it can cost nothing at all. `beve::Reader::try_slice::<f64>` hands back a `&
 
 Where the document is the array and nothing else -- a bulk numeric payload behind a protocol header, which is what the aligned form is usually written for -- `beve_slice_ref::<f64>(&bytes)` is that borrow without a cursor to place first. It is the stricter of the two: `try_slice` reads the array it is pointed at and says nothing about what follows, while the document form requires the array to be all of the document, so bytes behind it decline the borrow the way a mismatched element type does. For an array inside a larger document, `seek` to it and borrow at the cursor.
 
+## Blocks, from a type this crate does not describe
+
+A run of numbers is one header and one contiguous block, and that is most of why the format is worth having. Everything above gets it from the declaration. This is the same path reached by hand, for the case a declaration cannot cover: a scalar from a crate you do not own, which the orphan rule keeps `beve::Read` and `beve::Write` off, so the field names an [adapter](schemas.md#types-you-do-not-own) instead.
+
+Two hooks per direction, and each pair exists on the type's trait and on the adapter's:
+
+| | Writing | Reading |
+|---|---|---|
+| A type you own | `Write::ARRAY`, `Write::write_payload` | `Read::read_bulk` |
+| Through an adapter | `WriteAs::ARRAY`, `WriteAs::write_payload` | `ReadAs::read_bulk` |
+
+`ARRAY` is the header bytes a run is stored under, or `None` for a run that belongs in a generic array. `write_payload` fills what that header opened; the count and, in the aligned form, the padding are already out, so it appends elements and nothing else. `read_bulk` is offered the other end: the header and count consumed, the element header and the count handed over, and the cursor on the payload. It answers `false` to decline, which sends the caller down the ordinary element-by-element path with the cursor put back where it was.
+
+All four default to the generic form, so an adapter that says nothing writes a generic array and reads it one value at a time. That is the right answer whenever the adapter has a conversion to do -- milliseconds to a `Duration`, a string to an address -- because there is no block to copy in the first place. It is the wrong answer only where the adapted type's memory *is* the payload, which is the case these are for.
+
+What declining costs is the array's own header, read once per field and then put back: the same probe an unadapted `Vec` has always made, to the point that the compiler emits one body for both. It is not per element, and there is none of it on the writing side, where `ARRAY` is a constant and the match on it folds at monomorphization.
+
+Saying so is `unsafe`, and it is one impl:
+
+```rust
+use structio::beve::NumericBytes;
+
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct Celsius(f64);
+
+// SAFETY: `repr(transparent)` over `f64`, and the declared element is `f64`'s.
+unsafe impl NumericBytes for Celsius {
+    const ELEMENT: u8 = <f64 as NumericBytes>::ELEMENT;
+}
+```
+
+`NumericBytes` is the bound on everything in this crate that reinterprets memory, and implementing it asserts four things: the type occupies `size_of::<Self>()` initialized bytes with no padding, every bit pattern of that size is a value, those bytes on a little-endian host are what BEVE stores for one `ELEMENT`, and one element is `size_of::<Self>()` bytes of payload. The fourth is the one a compiler can check and it is checked -- an impl whose declared element is not its own width is a build error naming the limit, reported when the crate is *built* rather than by `cargo check` or by an editor running one, the width being a constant of a generic type. The other three are why the trait is `unsafe`. `#[repr(transparent)]` over a primitive satisfies all four by construction and is the shape this expects.
+
+With that, `Reader::read_block` and `Writer::write_block` are the copy in each direction, and they are what the two hooks call. Neither is `unsafe`, because neither can produce an invalid value -- every bit pattern of a `NumericBytes` type is one. What a wrong call produces is a wrong *answer*: taking a payload at some other width leaves the cursor inside the next value and the document reads on from there as if nothing had happened. So the element-type test at the top of `read_bulk` is not a formality, and neither is agreeing with the header `ARRAY` named.
+
+Three things follow from all four hooks being reachable.
+
+**The bytes are the same bytes.** An adapted `Vec` of a foreign scalar writes the typed array the bare `Vec` would have written, byte for byte, and reads it back in the same single copy. A pinned byte contract -- a golden file, a reader in another language, a hash over the encoding -- survives the move from a type to an adapter over it.
+
+**`Same` is an identity on both halves.** `structio::Same` forwards `ARRAY` and `read_bulk` alike, so `xs as Vec<Same>` over a `Vec<f64>` is indistinguishable from `xs`, in the document and in the work done to produce it.
+
+**The zero-copy borrow opens too.** `NumericBytes` is what `beve::Reader::try_slice` and `beve_slice_ref` are bounded on, so a foreign scalar that implements it can be borrowed straight out of an [aligned document](#arrays-a-reader-can-point-at) rather than copied at all.
+
 ## What is not implemented
 
 - **128-bit floats are skipped, not decoded.** They are a valid width the specification defines and Rust has no type for.
@@ -279,6 +323,8 @@ Where the document is the array and nothing else -- a bulk numeric payload behin
 | `from_beve_reader_array::<T>(impl io::Read)` | The same into a fresh vector. |
 | `beve_slice_ref::<T>(&[u8]) -> Option<&[T]>` | Borrow a document that is one numeric array, or decline. |
 | `beve::Reader::try_slice::<T>()` | The same at the cursor, for a block inside a larger document. |
+| `beve::Reader::read_block(&mut Vec<T>, n)` | Take `n` elements of payload in one copy, for a `read_bulk` impl. |
+| `beve::Writer::write_block(&[T])` | Append a block of payload in one copy, for a `write_payload` impl. |
 | `beve::Documents::array(impl io::Read)` | Stream the elements of one top-level array. |
 | `beve::Documents::values(impl io::Read)` | Stream whole documents written back to back. |
 | `beve::Feed::array()` / `beve::Feed::values()` | The same two framings, for bytes pushed at you. |

@@ -13,6 +13,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hash};
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -197,41 +198,106 @@ impl Write for () {
 // A typed array of numbers is, on a little-endian host, already the in-memory
 // form of the corresponding slice, so both directions are one copy. Integers
 // and floats want identical code for it, and it is the only place in the crate
-// that reinterprets memory, so the two helpers below hold the whole of that
-// argument rather than each numeric macro restating it.
-
-/// The seal on [`NumericBytes`]: it cannot be named from outside the crate, so
-/// it cannot be implemented from outside either.
-pub(crate) mod sealed {
-    pub trait Sealed {}
-}
+// that reinterprets memory, so `NumericBytes` below holds the whole of that
+// argument rather than each numeric macro restating it. The two copies
+// themselves are `Reader::read_block` and `Writer::write_block`, which sit
+// with the cursor and the buffer they move bytes through and are public for
+// the same reason the traits' bulk hooks are: an adapter over a foreign scalar
+// has to be able to reach them.
 
 /// Types whose little-endian in-memory form *is* a BEVE typed array's payload.
 ///
-/// The bound on everything in this crate that reinterprets memory: the two
-/// block helpers below, and [`Reader::try_slice`], which hands a block back as
-/// a slice pointing into the document. Sealed, because the set is the numbers
-/// BEVE can name and nothing else belongs in it.
+/// The bound on everything in this crate that reinterprets memory:
+/// [`Reader::read_block`] and [`Writer::write_block`], which copy a whole
+/// payload in each direction, and [`Reader::try_slice`], which hands one back
+/// as a slice pointing into the document without copying at all.
+///
+/// The crate implements it for every number BEVE can name, and for
+/// [`Complex`](crate::Complex) of each. It is implementable from outside for
+/// the case those cannot cover: a scalar from a crate you do not own, whose
+/// memory is already a payload, reached through an
+/// [adapter](crate::beve::ReadAs) because the orphan rule keeps [`Read`] and
+/// [`Write`] off it. That is the whole reason it is not sealed, and it is why
+/// it is `unsafe`: nothing here is checked at a use site, and the obligations
+/// below are the reader's and the writer's only grounds for reinterpreting the
+/// bytes.
 ///
 /// # Safety
 ///
-/// Implementing this asserts three things about `Self`:
+/// Implementing this asserts four things about `Self`:
 ///
 /// - it occupies `size_of::<Self>()` initialized bytes with no padding, so
 ///   reading them as bytes exposes nothing uninitialized;
 /// - every bit pattern of that size is a valid value, so bytes off the wire
 ///   can become one without being checked;
 /// - on a little-endian host those bytes are exactly what BEVE stores for one
-///   element of [`ELEMENT`](NumericBytes::ELEMENT), in exactly that order.
-pub unsafe trait NumericBytes: Copy + sealed::Sealed {
+///   element of [`ELEMENT`](NumericBytes::ELEMENT), in exactly that order;
+/// - one such element is `size_of::<Self>()` bytes of payload, so a block of
+///   `n` of them is exactly `n * size_of::<Self>()` bytes.
+///
+/// The fourth is the one a compiler can check, and it is checked: an impl
+/// whose declared element is a width other than its own is refused where the
+/// block helpers are instantiated. The first three are yours to hold.
+/// `#[repr(transparent)]` over a primitive satisfies all four by construction
+/// and is the shape this expects.
+///
+/// Nothing here says a *document* holds this type. That stays a runtime test
+/// against [`ELEMENT`](NumericBytes::ELEMENT), and the helpers make the caller
+/// do it: see [`Read::read_bulk`].
+///
+/// [`Reader::read_block`]: crate::beve::Reader::read_block
+/// [`Writer::write_block`]: crate::beve::Writer::write_block
+pub unsafe trait NumericBytes: Copy {
     /// The header one of these carries when it stands alone, which is the
     /// header a typed array of them implies for its elements.
     ///
     /// What a stored array's element type is compared against, and so what
     /// decides whether its payload is already this type's memory or has to be
-    /// converted element by element.
-    #[doc(hidden)]
+    /// converted element by element. A newtype over a primitive forwards the
+    /// primitive's:
+    ///
+    /// ```
+    /// use structio::beve::NumericBytes;
+    ///
+    /// #[derive(Clone, Copy)]
+    /// #[repr(transparent)]
+    /// struct Celsius(f64);
+    ///
+    /// // SAFETY: `repr(transparent)` over `f64`, which satisfies all four
+    /// // clauses, and the declared element is `f64`'s own.
+    /// unsafe impl NumericBytes for Celsius {
+    ///     const ELEMENT: u8 = <f64 as NumericBytes>::ELEMENT;
+    /// }
+    /// ```
     const ELEMENT: u8;
+}
+
+/// The width arithmetic behind a block, and the one clause of the
+/// [`NumericBytes`] contract a compiler can check.
+///
+/// A constant of a generic type, so it is evaluated once per element type that
+/// reaches a block helper and a type that disagrees with its own declared
+/// element is refused when the crate using it is built. The impls in this file
+/// are checked where they are written, by `numeric_bytes!`; this is the same
+/// check for one written somewhere else.
+pub(crate) struct Block<T>(PhantomData<fn(T)>);
+
+impl<T: NumericBytes> Block<T> {
+    /// Bytes one element occupies, which by the contract is `size_of::<T>()`.
+    ///
+    /// Used in place of `size_of::<T>()` at every site that measures a
+    /// payload, so the check is load bearing rather than a dangling assertion
+    /// somebody could delete without noticing.
+    pub(crate) const WIDTH: usize = match header::element_width(T::ELEMENT) {
+        Some(width) => {
+            assert!(
+                width == size_of::<T>(),
+                "structio: a `NumericBytes` type whose declared element is not its own width"
+            );
+            width
+        }
+        None => panic!("structio: a `NumericBytes` type whose declared element has no width"),
+    };
 }
 
 /// Every primitive of a fixed width: no padding, every bit pattern a value,
@@ -245,13 +311,14 @@ macro_rules! numeric_bytes {
     ($($t:ty, $cat:expr, $code:expr);* $(;)?) => {$(
         // The declared class is the type's own width, which is the one clause
         // of the marker a compiler can check: it is what makes a payload of
-        // `n` elements exactly `n * size_of::<Self>()` bytes.
+        // `n` elements exactly `n * size_of::<Self>()` bytes. `Block::WIDTH`
+        // makes the same check for every impl, this one included, but only
+        // where a block helper is instantiated; here it lands on the
+        // declaration, which is where a wrong one would be written.
         const _: () = match header::byte_width($cat, $code) {
             Some(width) => assert!(width == size_of::<$t>()),
             None => panic!("structio: a numeric type with no width in BEVE"),
         };
-
-        impl sealed::Sealed for $t {}
 
         unsafe impl NumericBytes for $t {
             const ELEMENT: u8 = header::number($cat, $code);
@@ -274,55 +341,6 @@ numeric_bytes! {
     u64, header::CAT_UNSIGNED, header::code_for(8);
     u128, header::CAT_UNSIGNED, header::code_for(16);
     usize, header::CAT_UNSIGNED, header::code_for(size_of::<usize>());
-}
-
-/// Take the payload of a typed array of `n` elements into `out` in one copy.
-///
-/// # Correctness
-///
-/// The bound covers the layout of `T`; it says nothing about the document. The
-/// caller must have established that the stored element type is
-/// [`T::ELEMENT`](NumericBytes::ELEMENT) and that the host is little endian,
-/// neither being a property of `T`. Neither is a soundness matter: taking a
-/// payload of some other width leaves the cursor inside the next value, which
-/// is a misparse rather than undefined behaviour, and one that is silent.
-#[inline]
-pub(crate) fn read_le_block<O: Options, T: NumericBytes>(
-    out: &mut Vec<T>,
-    n: usize,
-    r: &mut Reader<'_, O>,
-) -> PResult<bool> {
-    let total = n
-        .checked_mul(size_of::<T>())
-        .ok_or(ErrorCode::UnexpectedEnd)?;
-    // Bounds-checked before anything is reserved, so a bogus count cannot make
-    // this allocate.
-    let bytes = r.take(total)?;
-    out.clear();
-    out.reserve(n);
-    // SAFETY: `clear` then `reserve(n)` gives room for `total` bytes at a
-    // pointer aligned for `T`, `bytes` is `total` bytes of a distinct borrow of
-    // the input, and by the bound those bytes are `n` values of `T`.
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr().cast::<u8>(), total);
-        out.set_len(n);
-    }
-    Ok(true)
-}
-
-/// Append `items` as a typed array's payload in one copy.
-///
-/// # Correctness
-///
-/// As [`read_le_block`]: the header the caller has already written must be the
-/// one for `T`, and the host must be little endian.
-#[inline]
-pub(crate) fn write_le_block<O: Options, T: NumericBytes>(items: &[T], w: &mut Writer<'_, O>) {
-    // SAFETY: read-only reinterpretation of `size_of_val(items)` initialized
-    // bytes, which by the bound are the payload as it should be written.
-    let bytes =
-        unsafe { core::slice::from_raw_parts(items.as_ptr().cast::<u8>(), size_of_val(items)) };
-    w.raw(bytes);
 }
 
 /// Integers are stored at their declared width, and read from any width that
@@ -349,7 +367,8 @@ macro_rules! impl_int {
                 // The tag test above is the half of the contract the bound
                 // does not cover: it establishes that the stored element type
                 // is this one.
-                read_le_block(out, n, r)
+                r.read_block(out, n)?;
+                Ok(true)
             }
         }
 
@@ -365,7 +384,7 @@ macro_rules! impl_int {
 
             fn write_payload<O: Options>(items: &[$t], w: &mut Writer<'_, O>) {
                 if cfg!(target_endian = "little") {
-                    write_le_block(items, w)
+                    w.write_block(items)
                 } else {
                     for v in items {
                         w.raw(&v.to_le_bytes());
@@ -402,7 +421,8 @@ macro_rules! impl_float {
                 }
                 // As in `impl_int!`: the tag test is what the bound leaves to
                 // the caller.
-                read_le_block(out, n, r)
+                r.read_block(out, n)?;
+                Ok(true)
             }
         }
 
@@ -418,7 +438,7 @@ macro_rules! impl_float {
 
             fn write_payload<O: Options>(items: &[$t], w: &mut Writer<'_, O>) {
                 if cfg!(target_endian = "little") {
-                    write_le_block(items, w)
+                    w.write_block(items)
                 } else {
                     for v in items {
                         w.raw(&v.to_le_bytes());
@@ -885,15 +905,30 @@ impl_tuple!(12; A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10, L 11);
 // header and one block. Without it every adapted sequence would quietly become
 // a generic array: a valid document, one byte per element larger.
 //
-// Reading gives it up. `Reader::try_bulk` copies a whole typed array into a
-// `Vec<T>` in one `memcpy`, and it can only do that by knowing the element
-// type; an adapter is precisely the claim that the element is read some other
-// way. A numeric field that wants the bulk path should stay unadapted.
+// Reading keeps it too, through the matching hook. `ReadAs::read_bulk` is the
+// adapter's answer to `Read::read_bulk`, and `Reader::try_bulk_with` offers a
+// block to it exactly as `try_bulk` offers one to the type; `Same` forwards to
+// the type's, so a `Vec<Same>` is the same `memcpy` the bare `Vec` is. An
+// adapter that leaves the hook alone declines and reads element by element,
+// which is the right answer whenever the adapter has a conversion to do.
 
 impl<'de, T: Read<'de>> ReadAs<'de, T> for Same {
     #[inline]
     fn read<O: Options>(value: &mut T, r: &mut Reader<'de, O>) -> PResult<()> {
         value.read(r)
+    }
+
+    /// The identity on the reading side of a block, as `ARRAY` is on the
+    /// writing side: whatever the type would have done with the payload,
+    /// including declining it.
+    #[inline]
+    fn read_bulk<O: Options>(
+        out: &mut Vec<T>,
+        n: usize,
+        elem: u8,
+        r: &mut Reader<'de, O>,
+    ) -> PResult<bool> {
+        <T as Read<'de>>::read_bulk(out, n, elem, r)
     }
 }
 
@@ -1027,16 +1062,29 @@ impl_write_deref_as!(Box<A>, Box<T>; Rc<A>, Rc<T>; Arc<A>, Arc<T>);
 // -- Sequences --------------------------------------------------------------
 
 /// Read over elements that are already here before growing, exactly as the
-/// plain `Vec` and `VecDeque` impls do. The bulk path is not reachable from
-/// here; see the note at the head of this section.
+/// plain `Vec` and `VecDeque` impls do.
+///
+/// `Vec` also offers the block to the adapter first, which is the one thing
+/// that differs between the two and the reason the bulk hook is named here.
+/// `VecDeque` has no such offer to make: its storage is a ring, so there is no
+/// one run of memory a payload could be copied into.
 macro_rules! impl_read_seq_as {
-    ($($ty:ident: $push:ident),* $(,)?) => {$(
+    ($($ty:ident: $push:ident $(=> $bulk:ident)?),* $(,)?) => {$(
         impl<'de, A, T> ReadAs<'de, $ty<T>> for $ty<A>
         where
             A: ReadAs<'de, T>,
             T: Default,
         {
             fn read<O: Options>(value: &mut $ty<T>, r: &mut Reader<'de, O>) -> PResult<()> {
+                $(
+                    // The whole array in one copy, when the adapter says the
+                    // stored elements are already the values. Declines without
+                    // consuming anything otherwise, which is what every
+                    // adapter that leaves the hook alone does.
+                    if r.$bulk::<A, _>(value)? {
+                        return Ok(());
+                    }
+                )?
                 let held = value.len();
                 let n = r.read_seq(|r, i| {
                     if i < held {
@@ -1054,7 +1102,7 @@ macro_rules! impl_read_seq_as {
         }
     )*}
 }
-impl_read_seq_as!(Vec: push, VecDeque: push_back);
+impl_read_seq_as!(Vec: push => try_bulk_with, VecDeque: push_back);
 
 /// A fixed-length array has every element already, so the adapter never needs
 /// `T: Default` here.

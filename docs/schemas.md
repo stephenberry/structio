@@ -232,7 +232,7 @@ Note that the second and third rows differ, and deliberately. A key you did not 
 
 Map keys may be strings, `char`, or integers. In JSON an integer key is stringified, as the format requires; in BEVE it is stored as an integer at its own width, with no round trip through text.
 
-A type outside this table can still be a field, through an [adapter](#types-you-do-not-own). Two rules come with one: an adapted container's *elements* need `Default`, and an adapted `Vec` gives up BEVE's bulk read.
+A type outside this table can still be a field, through an [adapter](#types-you-do-not-own). One rule comes with one: an adapted container's *elements* need `Default`.
 
 ### `Default` is required where values are constructed
 
@@ -336,6 +336,8 @@ structio::json_object!(Job {
 **It composes.** `Option<Millis>`, `Vec<Millis>`, `[Millis; N]`, `HashMap<Same, Millis>` and their nestings are adapters over the corresponding containers, each mirroring that container's own impl down to which allocations a read reuses. `structio::Same` is the identity adapter, for a position that wants the type's own impl inside one that does not: a `HashMap<Same, Millis>` adapts the values and leaves the keys alone. A whole-container adapter is equally possible — `blob as Hex` over a `Vec<u8>` writes one string rather than an array — and the two can sit in the same declaration.
 
 **It is per format.** `object!` asks for `json::ReadAs`, `json::WriteAs`, `beve::ReadAs` and `beve::WriteAs`; `json_object!` asks for the first pair alone. An adapter that only makes sense in one format is a `json_object!` declaration, exactly as a `&[u8]` field is a `beve_object!` one. The flip side is that one name at the field site now covers two encodings, and nothing checks that they agree: an adapter whose JSON half writes a string and whose BEVE half writes an integer is legal and invisible at the declaration. Keeping the two halves saying the same thing is the adapter author's job.
+
+**It can keep BEVE's block.** An adapted `Vec` writes a generic array and reads it element by element unless the adapter says otherwise, which is right for an adapter with a conversion to do and wrong for one over a type whose memory is already a typed array's payload. That second case is reachable: `beve::WriteAs::ARRAY` and `beve::ReadAs::read_bulk` are the adapter's own answers to the constants the type would have carried, and `Same` forwards both, so `xs as Vec<Same>` is byte for byte and copy for copy what `xs` would have been. See [Blocks](beve.md#blocks-from-a-type-this-crate-does-not-describe).
 
 **Somebody else can publish it.** The impls are on the adapter, which is local to whoever writes them, so a third crate may ship `pub struct Rfc3339;` with `impl structio::json::ReadAs<'_, DateTime<Utc>> for Rfc3339` and everyone downstream just names it. That is the property that makes a foreign type painless, and it arrives without this crate depending on anything.
 

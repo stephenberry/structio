@@ -15,6 +15,7 @@ use std::io;
 use std::marker::PhantomData;
 
 use crate::beve::header::{self, encode_size};
+use crate::beve::impls::{Block, NumericBytes};
 use crate::beve::traits::{Write, WriteArray, WriteAs, WriteKeyAs, WriteObject};
 use crate::options::{Options, Standard};
 
@@ -865,6 +866,39 @@ impl<'a, O: Options> Writer<'a, O> {
                 T::write_payload(items, self);
             }
         }
+    }
+
+    /// Append `items` as a block of payload in one copy.
+    ///
+    /// The copy behind [`Self::write_slice`], for an implementation of
+    /// [`Write::write_payload`] or [`WriteAs::write_payload`] to call once the
+    /// header and the count are out. It appends
+    /// `items.len() * size_of::<T>()` bytes and nothing else, so it is the
+    /// exact counterpart of [`Reader::read_block`].
+    ///
+    /// # Correctness
+    ///
+    /// As [`Reader::read_block`], and for the same reason it is not `unsafe`:
+    /// the [`NumericBytes`] bound covers `T`'s layout, and the two things it
+    /// does not cover are the caller's. The header already written must be the
+    /// one [`T::ELEMENT`](NumericBytes::ELEMENT) names, and the host must be
+    /// little endian. A big-endian host has to write each element's bytes
+    /// reversed instead, which is what every impl in this crate does behind a
+    /// `cfg!(target_endian)` test.
+    ///
+    /// [`Reader::read_block`]: crate::beve::Reader::read_block
+    #[inline]
+    pub fn write_block<T: NumericBytes>(&mut self, items: &[T]) {
+        // SAFETY: read-only reinterpretation of the slice's own
+        // `items.len() * size_of::<T>()` initialized bytes, which by the bound
+        // are the payload as it should be written.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                items.as_ptr().cast::<u8>(),
+                items.len() * Block::<T>::WIDTH,
+            )
+        };
+        self.raw(bytes);
     }
 
     /// Write a contiguous sequence, each element through an adapter.
