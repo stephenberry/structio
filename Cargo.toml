@@ -1,0 +1,27 @@
+[package]
+name = "structio"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "High performance JSON and BEVE for Rust structs. No dependencies, no proc-macros, no intermediate representation."
+repository = "https://github.com/stephenberry/structio"
+keywords = ["json", "beve", "serialization", "binary", "performance"]
+categories = ["encoding", "parser-implementations"]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[[bench]]
+name = "roundtrip"
+harness = false

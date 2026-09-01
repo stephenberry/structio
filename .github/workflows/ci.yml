@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a branch supersedes whatever was already running on it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing here writes anywhere. Say so, rather than inheriting the default.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # rust-toolchain.toml takes precedence over the toolchain the setup action
+  # makes default, so every job names its toolchain through the one thing that
+  # outranks the file. Without this the msrv job silently runs stable, and so
+  # does the miri job in the weekly workflow, which sets the same variable.
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Debug catches the debug_assert!s guarding the numeric kernels; release
+      # is what anyone actually runs, and the two disagree often enough in a
+      # crate this arithmetic-heavy to be worth both.
+      - run: cargo test
+      - run: cargo test --release
+
+      # Benches and examples are not run here (the benchmark takes minutes),
+      # but they are part of the crate and have to keep compiling.
+      - run: cargo build --benches --examples
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: msrv / 1.96
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.96.0"
+    steps:
+      - uses: actions/checkout@v5
+      # Pinned deliberately: this is the version the manifest promises, so it
+      # is checked exactly, not "whatever is oldest still supported".
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - run: cargo check --all-targets
+
+  # What actually gets uploaded is the packaged tarball, not the working tree.
+  # This builds and tests it in isolation, which is where a file left out of
+  # the package shows up, rather than after a release that cannot be taken back.
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --dry-run
+
+  # BEVE writes typed arrays as raw little-endian blocks and byte-swaps them
+  # elsewhere. s390x is the readily available big-endian target, and running
+  # the suite there is the only thing that executes those branches. Qemu comes
+  # from apt and the linker from the cross toolchain, so no extra tooling.
+  big-endian:
+    name: big-endian / s390x
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER: s390x-linux-gnu-gcc
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER: qemu-s390x -L /usr/s390x-linux-gnu
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: s390x-unknown-linux-gnu
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user gcc-s390x-linux-gnu
+      # Doctests are left out: rustdoc's handling of a cross runner is its own
+      # can of worms, and nothing endian-sensitive is documented by example.
+      - run: cargo test --release --target s390x-unknown-linux-gnu --lib --tests

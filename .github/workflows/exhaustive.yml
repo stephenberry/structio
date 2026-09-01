@@ -1,0 +1,77 @@
+name: Weekly
+
+# The checks that are too slow for every push and too valuable to only ever run
+# by hand. The float tests sweep an entire input domain: the shortest-round-trip
+# writer is checked against every one of the 2^32 f32 bit patterns. Miri is here
+# for its own reason, which is wall clock rather than domain size.
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  exhaustive:
+    name: exhaustive float checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Named individually rather than by `--ignored` alone, which would also
+      # pick up the timing tests. Both are release-only; debug takes hours.
+      - run: cargo test --release --lib -- --ignored --exact num::zmij::tests::to_bcd8_exhaustive
+      - run: cargo test --release --lib -- --ignored --exact num::tests::float_f32_exhaustive
+
+  # The crate's unsafe is unaligned loads, writes into uninitialized capacity,
+  # and reinterpreting a typed slice as bytes. None of that shows up as a test
+  # failure when it is wrong, only as luck, so it is checked by an interpreter
+  # instead. The randomized tests draw a smaller sample under `cfg(miri)`.
+  #
+  # What bounds this job is one test rather than the suite: with the tests
+  # spread across processes, `corrupting_any_beve_byte_never_panics` alone was
+  # 1157 seconds of a 1213 second run. More cores buy nothing past that, so if
+  # the timeout is ever hit again the lever is that test's `cfg(miri)` sample,
+  # not the parallelism.
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      # Miri builds std from source; warnings there are not ours to fix.
+      RUSTFLAGS: ""
+      # The key map takes `&'static str`, so its generated-key tests leak the
+      # strings they build rather than contort the API. A leak is not
+      # undefined behaviour and is not what Miri is here for; the alternative
+      # is a list of test targets to run, which would silently skip any file
+      # added later.
+      MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-ignore-leaks
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      # A prebuilt binary rather than `cargo install`, which would spend on
+      # compiling nextest much of what running it saves. Pinned to the major
+      # version, as `actions/checkout` is.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # Through nextest, which runs each test in a process of its own. Miri is
+      # single threaded, and `cargo test` runs one test at a time, so the plain
+      # command leaves every core but one idle for the whole job; measured
+      # locally, the same suite goes from about 100 minutes to 20.
+      #
+      # Doctests are skipped, as they were before: Miri cannot run them, and
+      # nextest does not run them either, so nothing that was checked stops
+      # being checked.
+      - run: cargo miri nextest run --lib --tests

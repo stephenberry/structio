@@ -1,0 +1,9 @@
+version: 2
+
+# The crate itself has no dependencies. This is only here to keep the pinned
+# action versions in .github/workflows from going stale.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
