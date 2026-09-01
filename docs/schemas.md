@@ -138,71 +138,22 @@ An object *can* tolerate a schema that drifts, because a reader matches on names
 
 ### Enums
 
-An enum's schema is its variant names, and they go on the wire as names rather than as positions, so adding or reordering variants does not change what a document already means.
-
-A variant that carries nothing is written as its name:
+An enum's schema is its variant names, and they go on the wire as names rather than as positions, so adding or reordering variants does not change what a document already means. A variant that carries nothing is written as its name, and a variant that carries a value as an object of one member keyed by that name:
 
 ```rust
-#[derive(Default)]
-enum Level {
-    #[default]
-    Info,
-    Warning,
-    Error,
-}
-
-structio::unit_enum!(Level { Info, Warning, Error });
-```
-
-`Level::Warning` writes as `"Warning"` in JSON and as a BEVE string. Names are renamed the way keys are, with `"warning" => Warning`.
-
-A variant that carries a value is written as an object of one member, keyed by the name. Mark it with `(_)`:
-
-```rust
-#[derive(Default)]
-struct Circle { radius: f64 }
-structio::object!(Circle { radius });
-
 #[derive(Default)]
 enum Shape {
     #[default]
     Empty,
-    Circle(Circle),
     Sides(u32),
 }
 
-structio::tagged_enum!(Shape { Empty, Circle(_), Sides(_) });
+structio::tagged_enum!(Shape { Empty, Sides(_) });
 ```
 
-`Shape::Empty` writes as `"Empty"` and `Shape::Circle(..)` as `{"Circle":{"radius":2}}`. The payload's type is not repeated in the declaration; it is already on the enum, and stating it twice would be a second place to keep in step.
+`Shape::Empty` writes as `"Empty"` and `Shape::Sides(6)` as `{"Sides":6}`. [`unit_enum!`](enums.md#declaring-one) is the same declaration for an enum whose variants all carry nothing, and will not compile if one of them does.
 
-Both wire forms are accepted for either kind of variant, so a producer that always writes the object form still round-trips: `Empty` reads back from `"Empty"` and from `{"Empty":null}` alike. What is refused is a name no variant claims, and that is refused under every policy, `SkipUnknown` included. An unknown object key can be stepped over and the object still read; an unknown variant would leave the value itself undecided, so there is nothing to fall back to.
-
-`unit_enum!` will not compile if a variant carries a value. That promise pays for itself in BEVE: the value is a string and can be nothing else, so a `Vec<Level>` is stored as a **string array**, one header for the whole run, and comes out byte for byte what a `Vec<String>` of the same names would. `tagged_enum!` cannot do that even for a declaration that happens to be all unit variants, since a variant carrying a value writes an object. Reading is unaffected either way: a sequence of enums accepts a string array or a generic one however it was written.
-
-Either macro makes extending the enum without extending the declaration a compile error rather than a value that silently writes nothing.
-
-#### One payload, of a type you already declared
-
-A variant carries at most one value. That is the shape a `std::variant<A, B, C>` has, and the one that composes: the payload is an ordinary type, declared with `object!` or `array!` or built in, and the enum adds only the tag. A Rust variant with several fields, or with named fields, is not accepted; give it a struct or a tuple instead.
-
-```rust
-#[derive(Default)]
-enum Span {
-    #[default]
-    None,
-    Range((u32, u32)),
-}
-structio::tagged_enum!(Span { None, Range(_) });
-```
-
-`Span::Range((1, 5))` writes as `{"Range":[1,5]}`.
-
-BEVE's own type-tag extension is not used for any of this. It is deprecated, and it tags by index, which is the thing an enum's names are here to avoid. A tag is an ordinary one-member object, so everything that walks a document without decoding it — validating, pointing at a field, transcoding to JSON — reaches through a variant with no knowledge of enums at all: `/shape/Circle/radius` is a pointer like any other.
-
-Reading reuses what the destination already holds when it is already the variant being read, so a loop that reads the same variant repeatedly keeps its payload's buffers. Reading a *different* variant replaces the value, which is what changing variants means.
-
-`json_tagged_enum!` and `beve_tagged_enum!` generate one side, exactly as their object counterparts do.
+Enums have a page of their own: **[Enums](enums.md)** covers the two wire forms and which of them reading accepts, renaming, generics and borrowing, what is refused and with which error, how the policies meet a tag, the BEVE string-array form a unit enum takes, and how the rest of the crate walks a tag.
 
 ### Writing the impls by hand
 
