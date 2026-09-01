@@ -225,12 +225,31 @@ fn the_block_is_still_taken_in_one_copy() {
     // that declined it would still be correct and would read the fastest thing
     // in the format the slowest way there is, one element at a time, so this
     // asks the bulk path directly rather than inferring it from a value.
+    //
+    // Big-endian is where declining *is* the right answer, and the assertion
+    // follows the target rather than being skipped on one: the payload is
+    // little-endian, so a block taken whole would hand back byte-swapped
+    // numbers. There the contract is the other half of `try_bulk`'s promise --
+    // it says no, consumes nothing, and leaves the ordinary path to produce the
+    // values -- so that is what gets checked instead of nothing at all.
     let samples = vec![1.5f64; 1000];
     for doc in [to_beve(&samples), to_beve_aligned(&samples)] {
         let mut r = beve::Reader::new(&doc);
         let mut out: Vec<f64> = Vec::new();
-        assert!(r.try_bulk(&mut out).unwrap(), "declined the bulk path");
-        assert_eq!(out, samples);
+        let taken = r.try_bulk(&mut out).unwrap();
+        assert_eq!(
+            taken,
+            cfg!(target_endian = "little"),
+            "the bulk path is taken on little-endian and declined on big-endian"
+        );
+        if taken {
+            assert_eq!(out, samples);
+        } else {
+            assert!(out.is_empty(), "declined but pushed elements anyway");
+        }
+        // Either way the document reads correctly, which is what declining is
+        // allowed to cost: speed, never an answer.
+        assert_eq!(from_beve::<Vec<f64>>(&doc).unwrap(), samples);
     }
 }
 

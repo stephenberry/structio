@@ -1,0 +1,8 @@
+# Line endings are LF in the repository and LF on checkout, on every platform.
+#
+# Git for Windows defaults to `core.autocrlf=true`, which rewrites text files to
+# CRLF as they land in the working tree. That breaks anything matching on a
+# literal "\n": `tests/docs.rs` splits the examples on their `// docs:begin`
+# markers to check the documentation quotes them verbatim, and a marker followed
+# by "\r\n" is not the marker it is looking for.
+* text=auto eol=lf

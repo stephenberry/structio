@@ -7,3 +7,12 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # The msrv job pins this action to the exact version the manifest
+      # promises, so the pin is an assertion rather than a dependency. Bumping
+      # it would not update anything; it would turn that job into a second
+      # stable-toolchain build that can no longer fail for the one reason it
+      # exists. The crate's other jobs track `@stable` and `@nightly`, which are
+      # channels with nothing for Dependabot to bump, so ignoring the action
+      # outright costs no update that was ever wanted.
+      - dependency-name: dtolnay/rust-toolchain
