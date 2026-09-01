@@ -33,7 +33,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
       # Debug catches the debug_assert!s guarding the numeric kernels; release
@@ -50,7 +50,7 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -66,7 +66,7 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: "1.96.0"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # Pinned deliberately: this is the version the manifest promises, so it
       # is checked exactly, not "whatever is oldest still supported".
       - uses: dtolnay/rust-toolchain@1.96.0
@@ -79,7 +79,7 @@ jobs:
     name: package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo publish --dry-run
 
@@ -94,7 +94,7 @@ jobs:
       CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER: s390x-linux-gnu-gcc
       CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER: qemu-s390x -L /usr/s390x-linux-gnu
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: s390x-unknown-linux-gnu
