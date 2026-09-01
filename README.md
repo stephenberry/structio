@@ -63,7 +63,7 @@ Reach for structio when one of these matters more:
 | | |
 |---|---|
 | **You want BEVE** | A binary format that stays self-describing, so numeric arrays are a `memcpy` and documents are much smaller, without giving up the ability to skip a field you do not understand. |
-| **You care about build time** | There is no proc-macro crate to compile and link before your own code can start building, and no dependency tree at all. |
+| **You want a small dependency graph** | Nothing to audit, nothing to vendor, no proc-macro crate to build and link for the host before your own code can start, and nothing extra when cross-compiling. Compile *time* is a wash: measured over 200 declared structs, one format's impls cost about what `serde`'s two derives do. |
 | **You want to see what runs** | `object!`, `array!` and `tagged_enum!` expand to ordinary trait impls you could have written. There is no derive to reverse-engineer when something is slow or wrong. |
 | **You are converting a fixed set of known types** | Which is what the design is optimized for, at the cost of not handling arbitrary documents at all. |
 
@@ -73,6 +73,7 @@ Reach for structio when one of these matters more:
 
 - **No dependencies.** Standard library only.
 - **No proc-macros.** `object!`, `array!` and `tagged_enum!` are `macro_rules!` macros.
+- **A declaration is checked against its type.** A field added to the struct and forgotten in the declaration is a build error naming the field, not a member that quietly stops being written. `..` at the end says an omission is deliberate.
 - **One schema, both formats.** The field list and its hash table are declared once and shared; only the bytes differ.
 - **Objects or arrays.** `object!` declares a struct by key, `array!` by position, for types like a coordinate whose field names carry nothing.
 - **Required members, one at a time.** A field marked `#[required]` has to be in the document; the rest keep their defaults when it is quiet. Mixed schemas are most schemas, so this is the type's business rather than a reader policy.

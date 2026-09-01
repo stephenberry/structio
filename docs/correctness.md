@@ -28,6 +28,10 @@ Both formats share one table but reach it through different entry points, since 
 
 **A `#[required]` field's bit is the same index**, so the mask is checked against what the readers actually set rather than only against the declaration: one case per marked field in each format, from documents that carry every other member. The case worth the trouble is the wide struct. A mark needs a bit only for itself, so a struct of more than 64 fields may still have one, and the field past the 64th is where an implementation would go wrong quietly -- a shift by 64 wraps to bit 0 on most machines, which would credit a marked field for a member that is not there. A 70-field struct is read from a document holding only its 65th member and required to refuse it, in both formats.
 
+## Schema declarations
+
+**A declaration is checked against its type.** A field the struct has and the declaration does not is a build error naming the field, so the one drift a schema declared beside its type can suffer does not compile. The check is a struct literal in a function nothing calls, and its absence in a declaration ending in `..` is what makes the omission deliberate. Enums are covered by the exhaustive `match` at the end of each write impl, which has been there all along for the same reason. `tests/completeness.rs` pins what `..` then means on the wire, in both formats and for keyed and positional declarations alike.
+
 ## Errors
 
 **A missing key names itself.** `ErrorCode::MissingKey` is the one code whose offset can only point at the enclosing object, a member that is not in the document having no position of its own. `Error::key` carries the absent key, taken from the same `KEYS` the perfect hash is built over, so it is the key the document should have used rather than the Rust field name. `tests/error_key.rs` checks that under a rename, under a case rule, under `#[required]` and under `RequireKeys`, in both formats.

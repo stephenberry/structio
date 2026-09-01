@@ -104,8 +104,14 @@
 //!
 //! - **No dependencies.** Standard library only.
 //! - **No proc-macros.** [`object!`], [`array!`] and [`tagged_enum!`] are
-//!   `macro_rules!` macros, so there is no proc-macro crate to compile and
-//!   link before your code can build.
+//!   `macro_rules!` macros, so there is no proc-macro crate to build and link
+//!   for the host before your code can, and nothing extra when
+//!   cross-compiling. It buys a smaller dependency graph rather than a faster
+//!   build: expanding a declaration costs about what a derive costs.
+//! - **A declaration is checked against its type.** Naming a field the struct
+//!   does not have has always been an error; leaving one out is now one too,
+//!   naming the field. End a declaration with `..` where the omission is
+//!   deliberate.
 //! - **Keys are hashed at compile time.** [`KeyMap::build`] runs during const
 //!   evaluation and picks the cheapest perfect hash that fits your key set,
 //!   from a single byte comparison up to a full key hash. Both formats look

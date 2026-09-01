@@ -99,6 +99,54 @@ The other six rules land on the string serde lands on, for a snake_case field an
 
 A rule costs nothing at run time. It is a rewrite of a string during const evaluation, and the converted key ends up the same constant in read-only memory a spelled-out one would: a declaration with a rule and the same declaration with every key written out produce identical bytes in both formats. [`array!`](#positional-structs) takes no rule, since a positional struct writes no keys for one to convert.
 
+### A declaration is checked against its type
+
+A declaration names the fields twice, once in the struct and once here, so the two can drift. Naming a field the struct does not have has always been an error. Leaving one out is one too:
+
+```rust
+struct Config { host: String, port: u16, cache: Vec<u8> }
+
+structio::object!(Config { host, port });
+```
+
+```
+error[E0063]: missing field `cache` in initializer of `Config`
+ --> src/config.rs:3:1
+  |
+3 | structio::object!(Config { host, port });
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `cache`
+```
+
+Without it, that declaration compiles and `cache` is quietly absent from every document written, in both formats, with nothing to point at. It is the one mistake this style of declaration can make that a `#[derive]` cannot, and it is the mistake a field addition six months from now will make.
+
+Where the omission is deliberate, end the declaration with `..`:
+
+```rust
+structio::object!(Config { host, port, .. });
+```
+
+That reads as it reads in a Rust pattern: these fields, and there are others. The omitted field is then not written, not a key the reader knows, and untouched by [`read_into`](../README.md#json), which is what it would have been all along. `..` goes last, behind a comma, and it composes with every field form:
+
+```rust
+structio::object!(Marked as "camelCase" {
+    #[required] "FIRST" => first,
+    second,
+    third as Vec<structio::Same>,
+    ..
+});
+```
+
+[`array!`](#positional-structs) takes it in the same position, after an element type if there is one:
+
+```rust
+structio::array!(Vec3 [x, y, ..]);
+structio::array!(Rgb [u8; r, g, b, ..]);
+```
+
+Enums need no marker. A variant left out of the declaration already fails to compile, because a value of it would otherwise write nothing at all, and unlike an absent field there is no document that could represent it.
+
+The check costs nothing at run time and nothing in the generated code: it is a struct literal in a function nothing calls, inside a `const _` block, whose only purpose is to be type checked.
+
 ### Required fields
 
 A member the document has to carry is marked `#[required]`. Absence is otherwise no error, so an unmarked field the document leaves out keeps whatever the destination already held.

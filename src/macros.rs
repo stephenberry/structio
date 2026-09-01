@@ -149,6 +149,21 @@
 /// the containers and [`Same`](crate::Same) is the identity. See
 /// [`json::ReadAs`](crate::json::ReadAs).
 ///
+/// A declaration has to name every field of the type. Forgetting one is
+/// `error[E0063]: missing field \`cache\` in initializer of \`Config\``,
+/// pointed at the declaration, rather than a member that quietly stops being
+/// written. Where the omission is deliberate, end the declaration with `..`,
+/// which reads as it reads in a pattern: these fields, and there are others.
+///
+/// ```
+/// #[derive(Default)]
+/// struct Config { host: String, port: u16, cache: Vec<u8> }
+/// structio::object!(Config { host, port, .. });
+///
+/// let c = Config { host: "example".into(), port: 8080, cache: vec![1] };
+/// assert_eq!(structio::to_string(&c), r#"{"host":"example","port":8080}"#);
+/// ```
+///
 /// Generic and borrowing types take their impl generics in brackets. Write
 /// `'de` yourself when the type borrows from the input; it is the lifetime of
 /// the document being read.
@@ -277,10 +292,35 @@ macro_rules! __declare {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __declared {
-    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty { $($body:tt)* }) => {
+    // A declaration that ends in `..` leaves fields out on purpose, so the
+    // type is not checked against it.
+    //
+    // Every field carries its own trailing comma in this arm rather than the
+    // usual separator, which is what lets `..` follow a field that ends in an
+    // adapter. `..` is not in the follow set of a `ty` fragment and `,` is, so
+    // `$(as $with:ty)?),* ..` would not compile as a matcher at all.
+    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
+        $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)? ,)* ..
+    }) => {
         $crate::__case_check!($case);
-        $crate::__keys_impl!([$($wgen)*] [$case] $ty { $($body)* });
-        $crate::$m!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
+        $crate::__keys_impl!([$($wgen)*] [$case] [partial] $ty {
+            $($(#[$req])? $($key =>)? $field $(as $with)?),*
+        });
+        $crate::$m!([$($rgen)*] [$($wgen)*] [$case] $ty {
+            $($(#[$req])? $($key =>)? $field $(as $with)?),*
+        });
+    };
+    // Every field named, so the declaration is checked against the type.
+    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
+        $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
+    }) => {
+        $crate::__case_check!($case);
+        $crate::__keys_impl!([$($wgen)*] [$case] [all] $ty {
+            $($(#[$req])? $($key =>)? $field $(as $with)?),*
+        });
+        $crate::$m!([$($rgen)*] [$($wgen)*] [$case] $ty {
+            $($(#[$req])? $($key =>)? $field $(as $with)?),*
+        });
     };
 }
 
@@ -322,6 +362,52 @@ macro_rules! __each_name_once {
     };
 }
 
+/// Refuse a declaration that leaves one of the type's fields out.
+///
+/// The one real cost of declaring a schema beside a type rather than on it is
+/// that the field list is written twice and the two can drift. A field added to
+/// the struct and forgotten here is silently absent from both formats, with
+/// nothing to point at: the declaration still compiles, and every document
+/// written from it is quietly missing a member. This closes that.
+///
+/// The check is a struct literal rather than a destructuring pattern, for the
+/// diagnostic. Both catch the same mistake, but a pattern expanded from a macro
+/// reports that it requires `..` due to inaccessible fields, which names
+/// nothing, while a literal reports E0063, missing field so-and-so in the
+/// initializer of the type, which names the field and points the note at the
+/// declaration that forgot it.
+///
+/// `loop {}` is the field value because it has type `!` and so coerces to
+/// whatever the field is, with no bound on it: not `Default`, not `Sized`, not
+/// anything. Nothing calls the function, and it is inside a `const _` block, so
+/// the trait it hangs off cannot collide with anything the user has.
+///
+/// A declaration ending in `..` says the omission is deliberate and expands to
+/// nothing here.
+///
+/// There is no enum counterpart, because each format's write impl already ends
+/// in an exhaustive `match` over the declared variants, for the reason given
+/// there: a variant left out would otherwise write nothing at all.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __declares_every_field {
+    ([$($wgen:tt)*] [partial] $ty:ty { $($field:ident),* }) => {};
+    ([$($wgen:tt)*] [all] $ty:ty { $($field:ident),* }) => {
+        const _: () = {
+            #[allow(dead_code)]
+            trait DeclaresEveryField: ::core::marker::Sized {
+                fn declared() -> Self;
+            }
+            impl<$($wgen)*> DeclaresEveryField for $ty {
+                #[allow(unreachable_code, clippy::empty_loop)]
+                fn declared() -> Self {
+                    Self { $($field: loop {}),* }
+                }
+            }
+        };
+    };
+}
+
 /// Whether a field carried the `#[required]` marker.
 ///
 /// A field's markers reach [`__keys_impl!`](crate::__keys_impl) as an optional
@@ -351,11 +437,12 @@ macro_rules! __is_required {
 #[macro_export]
 macro_rules! __keys_impl {
     (
-        [$($wgen:tt)*] [$case:tt] $ty:ty {
+        [$($wgen:tt)*] [$case:tt] [$mode:ident] $ty:ty {
             $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
         }
     ) => {
         $crate::__each_name_once!($($field),*);
+        $crate::__declares_every_field!([$($wgen)*] [$mode] $ty { $($field),* });
 
         impl<$($wgen)*> $crate::Keys for $ty {
             const KEYS: &'static [&'static str] = &[
@@ -860,6 +947,19 @@ macro_rules! __beve_is_null_as {
 /// array or a typed one whatever it was declared as, so adding an element type
 /// changes what you write without narrowing what you accept.
 ///
+/// Like [`object!`], a declaration has to name every field, and `..` at the
+/// end of the list says an omission is deliberate. It goes behind the element
+/// type where there is one.
+///
+/// ```
+/// #[derive(Default)]
+/// struct Rgb { r: u8, g: u8, b: u8, label: String }
+/// structio::array!(Rgb [u8; r, g, b, ..]);
+///
+/// let c = Rgb { r: 1, g: 2, b: 3, label: "red".into() };
+/// assert_eq!(structio::to_string(&c), "[1,2,3]");
+/// ```
+///
 /// # When to reach for it
 ///
 /// Position is cheaper than a key in every respect: nothing is hashed, nothing
@@ -932,8 +1032,7 @@ macro_rules! __declare_array {
         $crate::__no_array_case!();
     };
     ($m:ident [ 'de $($gen:tt)* ] $ty:ty [ $($body:tt)* ]) => {
-        $crate::__elements_impl!(['de $($gen)*] $ty [ $($body)* ]);
-        $crate::$m!(['de $($gen)*] ['de $($gen)*] $ty [ $($body)* ]);
+        $crate::__declared_array!($m ['de $($gen)*] ['de $($gen)*] $ty [ $($body)* ]);
     };
     // Generics without `'de`: the read impls need it, the write impls must not
     // declare an unconstrained lifetime.
@@ -941,15 +1040,13 @@ macro_rules! __declare_array {
         $crate::__no_array_case!();
     };
     ($m:ident [ $($gen:tt)* ] $ty:ty [ $($body:tt)* ]) => {
-        $crate::__elements_impl!([$($gen)*] $ty [ $($body)* ]);
-        $crate::$m!(['de, $($gen)*] [$($gen)*] $ty [ $($body)* ]);
+        $crate::__declared_array!($m ['de, $($gen)*] [$($gen)*] $ty [ $($body)* ]);
     };
     ($m:ident $ty:ty as $case:tt [ $($body:tt)* ]) => {
         $crate::__no_array_case!();
     };
     ($m:ident $ty:ty [ $($body:tt)* ]) => {
-        $crate::__elements_impl!([] $ty [ $($body)* ]);
-        $crate::$m!(['de] [] $ty [ $($body)* ]);
+        $crate::__declared_array!($m ['de] [] $ty [ $($body)* ]);
     };
 }
 
@@ -980,6 +1077,40 @@ macro_rules! __both_array_impls {
     };
 }
 
+/// A positional declaration whose generics are in normal form, split on whether
+/// it names every field.
+///
+/// [`__declared!`](crate::__declared)'s counterpart, and `..` means what it
+/// means there. The element type stays in front of the field list rather than
+/// being pulled out here, because only
+/// [`__elements_impl!`](crate::__elements_impl) and BEVE's writer act on it.
+///
+/// It takes four arms rather than two because an optional `$elem:ty ;` in front
+/// of a field list is a local ambiguity: the matcher cannot tell whether the
+/// first token begins a type or is already a field. Spelling both shapes out is
+/// what [`__elements_impl!`](crate::__elements_impl) and each format's array
+/// macro already do, for the same reason.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __declared_array {
+    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty [ $elem:ty ; $($field:ident ,)* .. ]) => {
+        $crate::__elements_impl!([$($wgen)*] [partial] $ty [ $elem ; $($field),* ]);
+        $crate::$m!([$($rgen)*] [$($wgen)*] $ty [ $elem ; $($field),* ]);
+    };
+    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty [ $elem:ty ; $($field:ident),* $(,)? ]) => {
+        $crate::__elements_impl!([$($wgen)*] [all] $ty [ $elem ; $($field),* ]);
+        $crate::$m!([$($rgen)*] [$($wgen)*] $ty [ $elem ; $($field),* ]);
+    };
+    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty [ $($field:ident ,)* .. ]) => {
+        $crate::__elements_impl!([$($wgen)*] [partial] $ty [ $($field),* ]);
+        $crate::$m!([$($rgen)*] [$($wgen)*] $ty [ $($field),* ]);
+    };
+    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty [ $($field:ident),* $(,)? ]) => {
+        $crate::__elements_impl!([$($wgen)*] [all] $ty [ $($field),* ]);
+        $crate::$m!([$($rgen)*] [$($wgen)*] $ty [ $($field),* ]);
+    };
+}
+
 /// The format-independent half: how many elements the array has.
 #[doc(hidden)]
 #[macro_export]
@@ -987,8 +1118,8 @@ macro_rules! __elements_impl {
     // With an element type: the fields have to be it, and saying so is the
     // whole difference, so it is checked here rather than left to whichever
     // format happens to use it.
-    ([$($wgen:tt)*] $ty:ty [ $elem:ty ; $($field:ident),* $(,)? ]) => {
-        $crate::__elements_impl!([$($wgen)*] $ty [ $($field),* ]);
+    ([$($wgen:tt)*] [$mode:ident] $ty:ty [ $elem:ty ; $($field:ident),* $(,)? ]) => {
+        $crate::__elements_impl!([$($wgen)*] [$mode] $ty [ $($field),* ]);
 
         const _: () = {
             #[allow(dead_code)]
@@ -997,8 +1128,9 @@ macro_rules! __elements_impl {
             }
         };
     };
-    ([$($wgen:tt)*] $ty:ty [ $($field:ident),* $(,)? ]) => {
+    ([$($wgen:tt)*] [$mode:ident] $ty:ty [ $($field:ident),* $(,)? ]) => {
         $crate::__each_name_once!($($field),*);
+        $crate::__declares_every_field!([$($wgen)*] [$mode] $ty { $($field),* });
 
         impl<$($wgen)*> $crate::Elements for $ty {
             // Counted by building a slice of the field names and taking its

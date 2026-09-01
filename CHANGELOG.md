@@ -12,6 +12,8 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ### Fixed
 
+- A declaration that leaves out one of its type's fields is a build error naming the field, rather than a member that quietly stops being written. End a declaration with `..` where the omission is deliberate: `object!(Config { host, port, .. })`, `array!(Rgb [u8; r, g, b, ..])`.
+
 - A declaration that names the same key or variant twice is a compile error even when the type is generic and never read. The check is in the key hash, which only reading used to reach.
 
 ### Added
