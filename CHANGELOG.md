@@ -4,39 +4,21 @@ Notable changes to structio. The format follows [Keep a Changelog](https://keepa
 
 Before 1.0 the API is not frozen: a minor bump may break it, and what broke is listed here.
 
-## [Unreleased]
-
-### Changed
-
-- `Error` gained a public field, so a struct literal or exhaustive `match` over it needs updating, and a `MissingKey` no longer compares equal to one built without a name. `ErrorCode` is untouched and the parser still propagates it alone.
-
-### Fixed
-
-- **A wide object compiles.** Past about 64 keys the perfect-hash search almost never succeeds, and it used to spend its whole budget finding that out: seconds of const evaluation per object, and past a certain width `error: constant evaluation is taking a long time`, where the compiler refuses the declaration outright. The search now stops where it stops being productive, and the fallback it was going to reach anyway is reached at once. Objects with distinguishable keys are unaffected at any width.
-- **Building a key map is faster to compile.** The whole-key hash folded the seed in from the first byte, so every seed the search tried re-read every byte of every key. The fold is now seed-independent and computed once per key. About a third off a 40-key object, and more as objects widen. Nothing changes about how a key is looked up at run time or what that costs. The hash itself does change, so a wide object may land on a different scheme than before, in either direction.
-- A declaration that leaves out one of its type's fields is a build error naming the field, rather than a member that quietly stops being written. End a declaration with `..` where the omission is deliberate: `object!(Config { host, port, .. })`, `array!(Rgb [u8; r, g, b, ..])`.
-
-- A declaration that names the same key or variant twice is a compile error even when the type is generic and never read. The check is in the key hash, which only reading used to reach.
-
-### Added
-
-- **A missing key names itself.** `Error` carries a third field, `key: Option<&'static str>`, holding the key a `MissingKey` is about. The offset for that code can only point at the enclosing object, so it never said which member was absent; it does now, in both messages. Every other code leaves it `None`. `Error` stays `Copy` and allocation-free. Hand-written readers set one with `Parser::set_error_key` / `Reader::set_error_key`, and `rewind` clears it.
-- **Case rules.** `object!`, `unit_enum!`, `tagged_enum!` and their `json_`/`beve_` variants take one after the type, as in `object!(Root as "camelCase" { .. })`, and convert every key the declaration does not spell out. The eight `serde` spellings are accepted, an explicit `"key" => field` still wins, and the conversion happens during compilation, so the bytes match the same declaration with every key written out. The rule differs from serde's in three ways worth checking before porting a schema; see [docs/schemas.md](docs/schemas.md#case-rules).
-- `Parser::read_number_str` and `Writer::write_number_str`: a number's text, borrowed and written verbatim, for a fixed-point, decimal, bignum, or rational type. JSON only.
-
-## [0.1.0]
+## [0.1.0] - 2026-09-01
 
 First release.
 
 - **JSON and BEVE from one schema.** `object!`, `array!`, `unit_enum!` and `tagged_enum!` declare a type's fields once; both formats read and write against that declaration. Keys are hashed at compile time into a perfect hash chosen to fit the key set.
 - **No dependencies and no proc-macros.** Standard library only. Rust 2024 edition, MSRV 1.96.
+- **Declarations are checked against the type.** Leaving out a field, or naming the same key twice, is a compile error that names what is wrong. End a declaration with `..` where the omission is deliberate: `object!(Config { host, port, .. })`.
+- **Case rules.** `object!(Root as "camelCase" { .. })` converts every key the declaration does not spell out, in the eight `serde` spellings, during compilation. See [docs/schemas.md](docs/schemas.md#case-rules) for three ways the rule differs from serde's.
 - **Reads reuse allocations.** `read_into` and `write_into` refill the buffers a value already holds, so a loop over records of one shape settles into no allocation.
 - **Compile-time options.** Indentation, inline arrays, skipping null members, refusing unknown keys, requiring declared keys, and JSONC comments, as policy types resolved at compile time. Unused settings cost nothing.
 - **BEVE beyond whole-document decoding.** `from_beve_at` reads the one value a JSON Pointer names, `validate_beve` checks a document without decoding it, `to_beve_aligned` writes numeric arrays a reader can borrow rather than copy, and `beve_slice_ref` takes that borrow.
 - **Streaming in both formats, both directions.** `Documents` pulls values from a reader, `Feed` takes values out of chunks pushed at you, and `read_beve_array_into` reads a document that is one enormous numeric array without holding its encoded form.
 - **`beve_to_json`** rewrites a BEVE document as JSON in one walk, with no schema and no tree.
 - **Complex numbers and matrices.** `Complex<T>` and `Matrix<T>` cover BEVE's two data-carrying extensions, in both formats.
-- **Errors carry a byte offset**, and `Error::display_with(input)` renders one with a line, column, and caret.
+- **Errors locate themselves.** `Error` carries a byte offset, `Error::display_with(input)` renders one with a line, column, and caret, and a `MissingKey` names the absent key.
+- `Parser::read_number_str` and `Writer::write_number_str`: a number's text, borrowed and written verbatim, for a fixed-point, decimal, bignum, or rational type. JSON only.
 
-[Unreleased]: https://github.com/stephenberry/structio/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/stephenberry/structio/releases/tag/v0.1.0

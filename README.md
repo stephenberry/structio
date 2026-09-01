@@ -1,5 +1,7 @@
 # structio
 
+[![crates.io](https://img.shields.io/crates/v/structio.svg)](https://crates.io/crates/structio)
+[![docs.rs](https://img.shields.io/docsrs/structio)](https://docs.rs/structio)
 [![CI](https://github.com/stephenberry/structio/actions/workflows/ci.yml/badge.svg)](https://github.com/stephenberry/structio/actions/workflows/ci.yml)
 
 **High-performance JSON and [BEVE](https://github.com/stephenberry/beve) for Rust structs.** No dependencies, no proc-macros, no intermediate representation.
@@ -12,11 +14,9 @@ Built in the spirit of [Glaze](https://github.com/stephenberry/glaze).
 
 ## Installation
 
-Not yet published to crates.io. Add it by git:
-
 ```toml
 [dependencies]
-structio = { git = "https://github.com/stephenberry/structio" }
+structio = "0.1"
 ```
 
 Rust 2024 edition, MSRV 1.96.
@@ -182,7 +182,7 @@ No comparison against `serde_json` has been run, so please do not infer one.
 
 ## Status
 
-Version 0.1.0, unpublished. The API is not yet frozen and the version number should be taken at face value. What changes between releases is in [CHANGELOG.md](CHANGELOG.md).
+Version 0.1.0, the first release. The API is not yet frozen and the version number should be taken at face value. What changes between releases is in [CHANGELOG.md](CHANGELOG.md).
 
 What that does *not* mean is untested. See [docs/correctness.md](docs/correctness.md) for the fuzzing, the exhaustive `f32` sweep, the Miri coverage of every `unsafe` block, and the byte-for-byte cross-check of the BEVE encoding against an independent implementation.
 

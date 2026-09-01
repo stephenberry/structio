@@ -9,6 +9,12 @@ repository = "https://github.com/stephenberry/structio"
 keywords = ["json", "beve", "serialization", "binary", "performance"]
 categories = ["encoding", "parser-implementations"]
 
+# Kept out of the published tarball. `rust-toolchain.toml` pins the toolchain
+# for work in this repository and has no meaning in a dependency, where nothing
+# reads it; the CI configuration is about the repository rather than the crate.
+# Everything else ships, tests and docs included, so the package is the source.
+exclude = [".github/", "rust-toolchain.toml"]
+
 [dependencies]
 
 [profile.release]
