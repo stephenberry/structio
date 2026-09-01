@@ -951,6 +951,14 @@ macro_rules! __beve_array_body {
 /// `Read`/`Write`, with BEVE's `Write` also carrying the string array. The
 /// names are hashed by the same [`KeyMap`](crate::KeyMap) that finds a
 /// struct's fields.
+///
+/// # Further reading
+///
+/// [docs/enums.md](https://github.com/stephenberry/structio/blob/main/docs/enums.md) is the long form: every error an enum can
+/// produce and what distinguishes it from the others, how the policies meet a
+/// tag, generics and borrowed payloads, the string array a run of unit
+/// variants becomes in BEVE, and how validation, pointers and transcoding walk
+/// through one.
 #[macro_export]
 macro_rules! unit_enum {
     // Every variant a bare name. Parentheses do not parse here, and that
@@ -1057,13 +1065,43 @@ macro_rules! unit_enum {
 ///
 /// # What is read back
 ///
-/// Both forms are accepted for either kind of variant, so a producer that
-/// always writes the object form still round-trips: a variant carrying nothing
-/// reads from `"Empty"` and from `{"Empty":null}` alike. What is refused is a
-/// name no variant claims, and that is refused under every policy, including
-/// [`SkipUnknown`](crate::SkipUnknown). Stepping over an unknown object key
-/// still leaves the object readable; stepping over an unknown variant would
-/// leave the value itself undecided.
+/// The two forms are not interchangeable, and the asymmetry runs one way. A
+/// variant carrying nothing reads from either, so a producer that always
+/// writes the object form still round-trips. A variant carrying a value has
+/// only the object form: the name on its own leaves the value missing, which
+/// is [`ExpectedBrace`](crate::ErrorCode::ExpectedBrace) in JSON and
+/// [`ExpectedObject`](crate::ErrorCode::ExpectedObject) in BEVE rather than an
+/// unknown variant, the name having been recognized and the value under it
+/// not being there.
+///
+/// ```
+/// # #[derive(Default, PartialEq, Debug)]
+/// # enum Shape { #[default] Empty, Sides(u32) }
+/// # structio::tagged_enum!(Shape { Empty, Sides(_) });
+/// use structio::{ErrorCode, from_str};
+///
+/// // A variant carrying nothing takes either form.
+/// assert_eq!(from_str::<Shape>("\"Empty\"").unwrap(), Shape::Empty);
+/// assert_eq!(from_str::<Shape>(r#"{"Empty":null}"#).unwrap(), Shape::Empty);
+///
+/// // A variant carrying a value takes the object form and only that.
+/// assert_eq!(from_str::<Shape>(r#"{"Sides":6}"#).unwrap(), Shape::Sides(6));
+/// assert_eq!(
+///     from_str::<Shape>("\"Sides\"").unwrap_err().code,
+///     ErrorCode::ExpectedBrace,
+/// );
+/// ```
+///
+/// What is refused is a name no variant claims, and that is refused under
+/// every policy, including [`SkipUnknown`](crate::SkipUnknown). Stepping over
+/// an unknown object key still leaves the object readable; stepping over an
+/// unknown variant would leave the value itself undecided.
+///
+/// An object that is not exactly one member, `{}` or two tags at once, and a
+/// value that is neither an object nor a string, are
+/// [`ExpectedVariant`](crate::ErrorCode::ExpectedVariant). Under the object
+/// form a variant carrying nothing wants `null` specifically, so `{"Empty":0}`
+/// is [`ExpectedNull`](crate::ErrorCode::ExpectedNull).
 ///
 /// Reading reuses what the destination already holds when it is already the
 /// variant being read, so a loop that reads the same variant repeatedly keeps
@@ -1082,6 +1120,14 @@ macro_rules! unit_enum {
 ///
 /// When a payload's type cannot support both formats, declare the enum with
 /// [`json_tagged_enum!`](crate::json_tagged_enum) or [`beve_tagged_enum!`](crate::beve_tagged_enum) instead.
+///
+/// # Further reading
+///
+/// [docs/enums.md](https://github.com/stephenberry/structio/blob/main/docs/enums.md) is the long form: every error an enum can
+/// produce and what distinguishes it from the others, how the policies meet a
+/// tag, generics and borrowed payloads, the string array a run of unit
+/// variants becomes in BEVE, and how validation, pointers and transcoding walk
+/// through one.
 #[macro_export]
 macro_rules! tagged_enum {
     ($($t:tt)*) => { $crate::__declare_enum!(__both_enum_impls $($t)*); };

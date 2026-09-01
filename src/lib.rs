@@ -89,6 +89,12 @@
 //! nothing, and will not compile if one of them does, so its wire form is a
 //! plain string and stays one.
 //!
+//! A variant carrying nothing reads back from either form, but one carrying a
+//! value has only the object form, and the two macros' pages say what each
+//! error means.
+//! [docs/enums.md](https://github.com/stephenberry/structio/blob/main/docs/enums.md)
+//! is the long form.
+//!
 //! The crate root re-exports the JSON entry points unqualified, because JSON
 //! is what most callers want first. The BEVE ones carry the format in the
 //! name at the root ([`to_beve`], [`from_beve`]) and drop it inside the
