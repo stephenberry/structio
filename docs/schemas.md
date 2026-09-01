@@ -210,6 +210,25 @@ Any type that has to be *created* during a read needs `Default`: an `Option`'s p
 
 This is the same requirement Glaze places on the types it deserializes, and it is what lets reading reuse the storage a value already holds instead of building a new one and assigning over the top.
 
+The entry points that *return* a value are the other place it is needed, and for the same reason: a function handed nothing but a document has to build a `T` before it can read into one. That is the constructor's arithmetic rather than a rule about taking part. [`read_into`](../README.md#json) and `read_beve_into` ask for the read impl and nothing else, so a type whose zero value would be a lie can keep one out of its API and hand the parser a value it made itself:
+
+```rust
+struct Session { token: String, expires: u64 }
+structio::object!(Session { token, expires });
+
+impl Session {
+    /// A placeholder to read over. Private, so nothing mistakes it for a value.
+    fn blank() -> Self { Session { token: String::new(), expires: 0 } }
+}
+
+let mut session = Session::blank();
+structio::read_into(&mut session, doc)?;
+```
+
+That is the same one line `#[derive(Default)]` would have been. What differs is who can see it: `Default` is public API, so every caller gets `Session::default()` and every `unwrap_or_default` elsewhere in the program will reach for it. A constructor private to the module that parses says the placeholder is a parsing detail, which is all it ever was.
+
+What this does not do on its own is check that the document supplied every field -- an absent member leaves the destination as it was, placeholder and all. [`RequireKeys`](options.md#error_on_missing_keys) is the policy that turns a missing member into a `MissingKey`, and it is what a type whose invariant is "every field was supplied" wants, with a `Default` or without one.
+
 ### Borrowing out of the input
 
 `&'de str` and `Cow<'de, str>` point directly into the document with no copy.

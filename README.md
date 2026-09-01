@@ -132,7 +132,7 @@ The crate root carries the JSON entry points unqualified and the BEVE ones with 
 | `Matrix::new(layout, extents, data)` | A matrix, stored as BEVE's matrix extension. |
 | `MatrixRef::new(layout, &[usize], &[T])` | The same, borrowed, for writing data you already hold. |
 
-`read_into` and `write_into` are the ones to reach for in a loop.
+`read_into` and `write_into` are the ones to reach for in a loop. `read_into` is also the way in for a type with no meaningful zero value: only the functions that *return* a `T` need `Default`, and a placeholder to read over [does not have to be public](docs/schemas.md#default-is-required-where-values-are-constructed).
 
 ### Between the formats
 
