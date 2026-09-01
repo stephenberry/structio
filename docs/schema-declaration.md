@@ -147,22 +147,23 @@ The `let mut i = 0; if index == i { .. } i += 1;` chain is not a stylistic choic
 
 ## B. Hand-rolled `#[derive]`
 
-A second crate, `structio-derive`, with `proc-macro = true`. Written against the raw `proc_macro::TokenStream` with no `syn`, no `quote`, no `proc-macro2`. Parsing a struct definition well enough to pull out field names, types, and `#[json(...)]` attributes is a few hundred lines of hand-written token walking.
+A second crate, `structio-derive`, with `proc-macro = true`. Written against the raw `proc_macro::TokenStream` with no `syn`, no `quote`, no `proc-macro2`.
 
 ```rust
-use structio::Structio;
+use structio_derive::Structio;
 
 #[derive(Structio, Default)]
-struct Person {
-    #[json(key = "first-name")]
-    first_name: String,
-    age: u32,
-    #[json(skip)]
+#[structio(case = "camelCase")]
+struct Accessor {
+    #[structio(required, key = "type")]
+    component_type: u32,
+    byte_offset: u32,
+    #[structio(skip)]
     cache: Vec<u8>,
 }
 ```
 
-Generics need no restatement; the derive reads them off the token stream:
+Generics need no restatement; the derive reads them off the token stream, which is the one thing a `macro_rules!` pattern structurally cannot do.
 
 ```rust
 #[derive(Structio, Default)]
@@ -172,24 +173,61 @@ struct Page<T> {
 }
 ```
 
-It expands to exactly the same impls as approach A, except that it *can* count, so it emits a real `match index { 0 => .., 1 => .., .. }` instead of the counter chain.
+### Two designs, and the one that was built
+
+A derive can **emit the impls itself**, in which case it can count and so emits a real `match index { 0 => .., 1 => .. }` rather than A's counter chain. It then holds a second copy of everything the schema means: the key list, the required mask, the adapters, the case rules, the element type, the completeness check. Every feature added to `object!` afterwards has to be added here too.
+
+Or it can **emit the `object!` invocation** and stop, in which case it is a front end that understands the declaration *syntax* and none of its semantics.
+
+The second was built, as a prototype, and then removed. What follows is what it measured, since a number beats the estimate this section used to carry.
+
+### What it came to
+
+**493 lines of code** (627 with its documentation), of which roughly half is the token walking `syn` exists to replace and the rest is attributes and emission. It expanded the example above to exactly:
+
+```rust
+structio::object!(Accessor as "camelCase" {
+    #[required] "type" => component_type,
+    byte_offset,
+    ..
+});
+```
+
+It reached `crate`, `case`, `json`, `beve`, `array`, `element` and `bound` on the container and `key`, `required`, `with` and `skip` on fields, renamed a single lifetime to `'de`, and preserved a type parameter's own bounds while adding the format's. `#[structio(skip)]` became the `..` that [the completeness check](schemas.md#a-declaration-is-checked-against-its-type) requires, so a derived declaration cannot drift either.
+
+**Compile cost, measured against the macro it expands to**, 200 structs of 10 fields:
+
+| | Cold leaf | Warm rebuild |
+|---|---|---|
+| `object!` | 6.56s | 1.72s |
+| `#[derive(Structio)]` | 6.95s | 1.71s |
+
+Six percent cold, nothing warm: about 2ms per struct for the bridge, the walk and the reparse. The crate itself built from clean in **0.32s**, against the 5 to 15 seconds `serde_derive` costs with `syn`. Both figures contradict what this section used to say about proc-macro crates being the largest single compile-time cost; that is true of `syn`, not of a proc-macro.
+
+### Why it was not shipped
+
+**A's drift is closed.** Writing the field names once was the argument that mattered, and it is [no longer A's problem](schemas.md#a-declaration-is-checked-against-its-type). What is left is typing.
+
+**It cannot cover enums.** `unit_enum!` and `tagged_enum!` need the shape of each variant's payload, which is a second parser rather than a longer one. A derive that covers structs and not enums makes "two ways to do things" concrete: two styles in one file.
+
+**It is intrusive**, so it can never replace A. No type from another module, a build script, or another macro. It is only ever an alternative.
+
+**It is still 493 lines to keep in step.** Nothing in it duplicates schema semantics, which is the point of the thin design, but it duplicates the schema *syntax*, and every future declaration feature needs an attribute spelled for it.
 
 ### Pros
 
-- **Field names written once.** Adding a field to the struct automatically adds it to the schema. This eliminates the entire class of drift bugs that A is exposed to.
-- **Idiomatic.** This is what every Rust user expects, because it is what `serde` does. Zero learning curve.
-- **Best attribute ergonomics.** `#[json(key = "...")]`, `#[json(skip)]`, `#[json(default)]` are self-documenting and attach to the field they modify.
-- **Handles generics, lifetimes, and `where` clauses** without the user restating them.
-- **Better spans.** Errors can be pointed at the exact field.
+- **Field names written once.** Adding a field to the struct adds it to the schema. Under A the same mistake is now a build error rather than silence, so this is convenience rather than safety.
+- **Idiomatic.** This is what every Rust user expects, because it is what `serde` does.
+- **Best attribute ergonomics.** `#[structio(key = "...")]` and `#[structio(skip)]` are self-documenting and attach to the field they modify, and they cost nothing at the field syntax the way A's positional forms do.
+- **Handles generics and lifetimes** without the user restating them. This is the one thing `macro_rules!` cannot be made to do.
+- **Skips const evaluation.** A derive could run `KeyMap::build`'s seed search as native host code and emit the finished table as a literal. The prototype did not, being a front end, but a full derive could, and it is the one place a proc-macro is genuinely better placed.
 
 ### Cons
 
-- **It is a dependency**, even if workspace-internal. `structio` would carry `structio-derive` in its dependency tree, and `cargo tree` shows it.
-- **Proc-macro crates are the largest single compile-time cost in the Rust ecosystem.** Even with no `syn`, the crate must be compiled *and fully linked into a host dynamic library* before any dependent crate can begin. This is a hard serialization point in the build graph: `cargo` cannot pipeline past it the way it can past a normal `rlib`.
-- **Always built for the host,** even when cross-compiling. On a cross build you pay for two target configurations.
-- **Per-expansion cost is higher.** Every `#[derive(Structio)]` serializes tokens across the proc-macro bridge, runs your parser, and serializes tokens back, and the result is then re-parsed by the frontend. `macro_rules!` does none of that.
-- **Hand-rolled token parsing is genuinely fiddly.** Attribute parsing, generic parameter splitting, `where` clause handling, and nested generic types with `>>` all need care. `syn` exists because this is annoying, and we are declining to use `syn`.
-- **Harder to debug.** Failures surface as compiler panics or malformed output rather than as readable Rust.
+- **It is a dependency.** `cargo tree` shows it, it is built for the host even when cross-compiling, and it is a serialization point in the build graph that a normal rlib is not. This is the real cost, and it is not measured in seconds.
+- **Worse spans, not better.** A derive *can* point at the exact field, but the thin design emits text and parses it back, so every error inside the expansion lands on the derive. That is the same place `object!` points today; it is a cost of the thin design rather than of derives.
+- **Hand-rolled token parsing is fiddly.** Attribute parsing, generic parameter splitting, and nested generics with `>>` all need care. Half the 493 lines are that.
+- **Coverage has to be complete to be worth having.** The forms it refuses have to be refused by name, or the derive becomes a path people hit a wall in.
 
 ---
 
@@ -300,6 +338,8 @@ Two of the original predictions are worth correcting explicitly, since both poin
 
 The counter chain was expected to be a meaningful part of A's cost. Against the same declaration written as a `match`, it is about 5%: 0.21s against 0.13s over 4,000 arms, which is 0.07s inside a 1.58s build. It stays for the expansion-shape reason given above, not because it is free, but it is not where the time goes.
 
+The row this table cannot hold is B against A over the same schema, because that is a different run and the numbers are not comparable across one. It is [in section B](#what-it-came-to), paired: six percent cold, nothing warm.
+
 ---
 
 ## Which is closest to `glz::meta`?
@@ -342,4 +382,4 @@ Ship **A** in the core crate as the primary path, with **C** always available un
 
 The compile-time half of the original argument for A did not survive measurement and has been struck from it. What is left still holds, and holds for better reasons: the dependency graph, non-intrusiveness, and an expansion a person can read. The one cost that would have argued for B, field drift, is closed by [the completeness check](schemas.md#a-declaration-is-checked-against-its-type).
 
-If the remaining duplication proves annoying in real use, **B** can still be added later as an optional `derive` feature on a separate crate without changing a line of the core library, because all three target the identical trait. It would also be the way to skip `KeyMap::build`'s const evaluation, which is the one thing a proc-macro is genuinely better placed to do.
+**B** was built as a prototype, measured, and removed rather than shipped, for the reasons in [why it was not shipped](#why-it-was-not-shipped). It can still be added later as a separate crate without changing a line of the core library, because all three target the identical trait, and it is the way to skip `KeyMap::build`'s const evaluation if that ever becomes the problem. What would argue for it is someone hitting the generics restatement often enough to say so, or a per-field option that will not fit A's positional syntax. Neither has happened.
