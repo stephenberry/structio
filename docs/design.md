@@ -108,6 +108,8 @@ The bulk loop is SWAR, eight digits per iteration, validated with two adds and a
 
 Floats parse in three tiers: an exact path (mantissa at most 2^53, small exponent, one hardware multiply), Eisel-Lemire, and for the handful of inputs where 128 bits cannot resolve a tie, the standard library's big-integer path. The third tier effectively never runs, and deferring to `str::parse` there is both correct by construction and less code than a second big-decimal implementation.
 
+`Parser::read_number_str`, which hands a number's text to a type this crate cannot convert to, walks the float scanner and discards the mantissa it accumulated. That costs a multiply and an add per digit against holding a second copy of the number grammar in step with the first, which is not a trade worth making for a path whose caller is about to run an arbitrary-precision parse.
+
 ## The writer
 
 Members are written with an **unconditional trailing comma**, and the last one is overwritten with `}`. That removes the per-field "am I first" branch from the inner loop entirely. Each member's `"key":` prefix is assembled by `concat!` at compile time, so writing one is a copy of a constant string.

@@ -14,7 +14,7 @@ use core::marker::PhantomData;
 
 use crate::error::{ErrorCode, PResult};
 use crate::json::traits::{Read, ReadArray, ReadEnum, ReadObject};
-use crate::num::atof::parse_float;
+use crate::num::atof::{parse_float, scan_number};
 use crate::num::atoi::{parse_i64, parse_u64, reject_float_tail};
 use crate::options::{Options, Standard};
 use crate::swar::{escape_mask, find_byte, first_match, load_u64, needs_escape};
@@ -625,6 +625,66 @@ impl<'de, O: Options> Parser<'de, O> {
             }
             Ok(magnitude as i128)
         }
+    }
+
+    /// Borrow a number's text out of the input, without converting it.
+    ///
+    /// The token is validated against the JSON number grammar and the cursor
+    /// is left just past it, exactly as [`read_f64`](Self::read_f64) leaves
+    /// it; what comes back is the literal itself, sign and exponent included.
+    ///
+    /// This is for a scalar none of the conversions above can hold: a
+    /// fixed-point or decimal type, an arbitrary-precision integer, a
+    /// rational. Reading such a value as an `f64` and converting is not an
+    /// implementation of it, since the rounding is the thing the type exists
+    /// to avoid; the digits are what the caller needs, so the digits are what
+    /// this returns. [`Writer::write_number_str`](crate::json::Writer::write_number_str)
+    /// is the other half.
+    ///
+    /// BEVE has no untyped number, so a type described this way has to pick a
+    /// binary form of its own; there is no equivalent on
+    /// [`beve::Reader`](crate::beve::Reader) to pair with.
+    ///
+    /// ```
+    /// use structio::{ErrorCode, Options, from_str, json, to_string};
+    ///
+    /// /// Stands in for a decimal type. What matters is that the digits
+    /// /// arrive whole; how one stores them is its own business.
+    /// #[derive(Default)]
+    /// struct Decimal(String);
+    ///
+    /// impl<'de> json::Read<'de> for Decimal {
+    ///     fn read<O: Options>(&mut self, p: &mut json::Parser<'de, O>) -> Result<(), ErrorCode> {
+    ///         self.0.clear();
+    ///         self.0.push_str(p.read_number_str()?);
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// impl json::Write for Decimal {
+    ///     fn write<O: Options>(&self, w: &mut json::Writer<'_, O>) {
+    ///         w.write_number_str(&self.0);
+    ///     }
+    /// }
+    ///
+    /// // Past an `f64`'s range and past its precision, and rounded by neither.
+    /// let text = "-1.2345678901234567890123e400";
+    /// let d: Decimal = from_str(text).unwrap();
+    /// assert_eq!(d.0, text);
+    /// assert_eq!(to_string(&d), text);
+    ///
+    /// // A token, not a span: what is not a number is refused here rather
+    /// // than by whoever parses the digits next.
+    /// assert!(from_str::<Decimal>("01").is_err());
+    /// ```
+    #[inline]
+    pub fn read_number_str(&mut self) -> PResult<&'de str> {
+        let start = self.idx;
+        scan_number(self.data, &mut self.idx)?;
+        // SAFETY: the input was a `&str`, and the scanner accepts only ASCII
+        // bytes, so both ends of this range are char boundaries and the range
+        // is valid UTF-8.
+        Ok(unsafe { core::str::from_utf8_unchecked(&self.data[start..self.idx]) })
     }
 
     // -----------------------------------------------------------------------

@@ -6,6 +6,10 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ## [Unreleased]
 
+### Added
+
+- `Parser::read_number_str` and `Writer::write_number_str`: a number's text, borrowed and written verbatim, for a fixed-point, decimal, bignum, or rational type. JSON only.
+
 ## [0.1.0]
 
 First release.

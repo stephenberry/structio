@@ -12,6 +12,7 @@ use std::io;
 use std::marker::PhantomData;
 
 use crate::json::traits::{Write, WriteArray, WriteAs, WriteKeyAs, WriteObject};
+use crate::num::atof::is_number;
 use crate::num::dtoa::{MAX_FLOAT_BYTES, write_f32, write_f64};
 use crate::num::itoa::{MAX_INT_DIGITS, write_u64};
 use crate::options::{Options, Standard};
@@ -328,6 +329,12 @@ impl<'a, O: Options> Writer<'a, O> {
     }
 
     /// Append a string verbatim, without quoting or escaping it.
+    ///
+    /// Whatever `s` holds becomes part of the document as written, so keeping
+    /// the result valid JSON is the caller's job. Emitting a number literal is
+    /// a supported use of this, and
+    /// [`write_number_str`](Self::write_number_str) is that use with the
+    /// literal checked.
     #[inline(always)]
     pub fn raw(&mut self, s: &str) {
         self.append(s.as_bytes());
@@ -813,6 +820,36 @@ impl<'a, O: Options> Writer<'a, O> {
             Some(n) => self.append_fixed(&tmp, n),
             None => self.write_null(),
         }
+    }
+
+    /// Write a number already in its JSON form.
+    ///
+    /// The other half of
+    /// [`Parser::read_number_str`](crate::json::Parser::read_number_str),
+    /// which is where the case for the pair is written out.
+    ///
+    /// # Panics
+    ///
+    /// Under `debug_assertions`, if `s` is not one JSON number literal. That
+    /// is a bug in the caller rather than a condition to handle: the document
+    /// is already being written, so there is nowhere for an error to go and
+    /// nothing to do but publish something no reader will accept. Release
+    /// builds append `s` unchecked, as [`raw`](Self::raw) does.
+    ///
+    /// ```
+    /// use structio::{Standard, json::Writer};
+    ///
+    /// let mut w = Writer::<Standard>::new();
+    /// w.write_number_str("-1.2345678901234567890123e400");
+    /// assert_eq!(w.into_string(), "-1.2345678901234567890123e400");
+    /// ```
+    #[inline]
+    pub fn write_number_str(&mut self, s: &str) {
+        debug_assert!(
+            is_number(s),
+            "structio: Writer::write_number_str requires a JSON number literal"
+        );
+        self.raw(s);
     }
 
     // -----------------------------------------------------------------------

@@ -407,3 +407,26 @@ pub(crate) fn parse_float<F: RawFloat>(buf: &[u8], i: &mut usize) -> PResult<F> 
     let text = core::str::from_utf8(&buf[start..end]).map_err(|_| ErrorCode::InvalidNumber)?;
     Ok(F::parse_fallback(text))
 }
+
+/// Walk a JSON number literal without converting it, leaving `*i` on the first
+/// byte after the token.
+///
+/// The same grammar [`parse_float`] holds its input to, because it is the same
+/// walk: [`Parser::read_number_str`](crate::json::Parser::read_number_str)
+/// hands back the digits for a type this crate cannot convert to, and a token
+/// it accepted must be one every other reader would have accepted too.
+#[inline]
+pub(crate) fn scan_number(buf: &[u8], i: &mut usize) -> PResult<()> {
+    scan(buf, i)?;
+    Ok(())
+}
+
+/// Whether `s` is one JSON number literal and nothing else.
+///
+/// The check behind
+/// [`Writer::write_number_str`](crate::json::Writer::write_number_str), which
+/// only runs it under `debug_assertions`.
+pub(crate) fn is_number(s: &str) -> bool {
+    let mut i = 0;
+    scan_number(s.as_bytes(), &mut i).is_ok() && i == s.len()
+}

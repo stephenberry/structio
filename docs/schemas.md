@@ -222,6 +222,14 @@ A run of numbers is the other thing BEVE can hand back whole. `Cow<'de, [f64]>` 
 
 `Cow<'de, [u8]>` is the case with nothing to satisfy, one-byte elements being aligned wherever they land, so it borrows whatever address the document is at. It differs from `&'de [u8]` in what it accepts: that one takes a run of bytes of either signedness and errors on anything else, where the `Cow` borrows the unsigned run and copies out of anything else a `Vec<u8>` could have read.
 
+### Numbers the conversions do not cover
+
+Every numeric read lands in an `f64`, an `i64`, a `u64`, an `i128` or a `u128`. A scalar that is none of those -- a fixed-point type, a decimal, an arbitrary-precision integer, a rational -- needs the digits rather than a conversion that has already rounded them, so `Parser::read_number_str` hands back the literal itself: the token is validated against the JSON number grammar, the cursor is left just past it, and what comes back is a `&'de str` pointing into the document. `Writer::write_number_str` is the other half, appending a literal the type spelled for itself and checking under `debug_assertions` that it really is one. Between them a `Read`/`Write` pair for such a type is a few lines, which the rustdoc on `read_number_str` shows in full.
+
+Reading the value as an `f64` and converting is not an implementation of this. The rounding is what the type exists to avoid.
+
+This is a JSON-only pair. BEVE has no untyped number -- a value carries its width and class in the header -- so a type described this way has to pick a binary form of its own, and is declared with `json_object!` unless it does.
+
 ## Types you do not own
 
 Rust's orphan rule means you cannot describe a foreign type from your crate the way you can specialize `glz::meta` for any C++ type: neither the trait nor the type is yours. There are two answers, and which one is right depends on how the type is used rather than on what it is.
