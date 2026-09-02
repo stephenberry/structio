@@ -283,8 +283,13 @@ impl<'de, O: Options> Parser<'de, O> {
     /// The two are balanced by the caller, and the public
     /// `read_object_rest` / `finish_internally_tagged` pair takes its `enter`
     /// from whoever opened the object. A hand-written impl that calls one of
-    /// those without having entered would wrap the depth and silently disable
-    /// the nesting limit for the rest of the parse, so a debug build says so.
+    /// those without having entered wraps the depth, and what that costs
+    /// depends on how often it happens: once, the next `enter` wraps it back
+    /// and the parse allows one extra level; repeatedly, the limit refuses
+    /// input it should have taken. It stops counting altogether only when a
+    /// stray `leave` cancels an `enter` at every level of a recursion, and
+    /// then a hostile document has no depth limit at all. A debug build says
+    /// so rather than leaving any of that to be discovered.
     #[inline(always)]
     pub(crate) fn leave(&mut self) {
         debug_assert!(

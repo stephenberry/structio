@@ -1644,9 +1644,9 @@ macro_rules! beve_tagged_enum {
 ///
 /// An object, and nothing else. The variant's members share one object with
 /// the tag, so a payload with no members of its own to share has nowhere to
-/// go: `Sides(u32)` is a compile error naming
-/// [`WriteObject`](crate::json::WriteObject), not a runtime surprise. Declare
-/// such a variant's payload as a struct, or use
+/// go: `Sides(u32)` is a compile error naming [`Keys`](crate::Keys), and then
+/// [`WriteObject`](crate::json::WriteObject) and its neighbours, rather than a
+/// runtime surprise. Declare such a variant's payload as a struct, or use
 /// [`tagged_enum!`](crate::tagged_enum), which takes any payload because it
 /// gives it an object of its own.
 ///
@@ -1655,12 +1655,16 @@ macro_rules! beve_tagged_enum {
 /// of a struct does: refused under [`Standard`](crate::Standard), stepped over
 /// under [`SkipUnknown`](crate::SkipUnknown).
 ///
-/// **Choose a tag no payload declares as a field.** The two share one object,
-/// so a collision writes the name twice: `{"kind":"Config","kind":"debug"}`.
-/// This crate reads that back, taking the first member as the tag; a last-wins
-/// parser does not, and loses the variant. It cannot be a compile error here,
-/// the payload's type being deliberately absent from the declaration, so there
-/// is no key list for the macro to check against.
+/// **A tag that is also a payload's field is refused at compile time.** The
+/// two share one object, so a collision would write the name twice
+/// (`{"kind":"Config","kind":"debug"}`), which this crate reads back and a
+/// last-wins parser does not: it keeps the field and loses the variant. The
+/// comparison is of wire names, so it catches a collision that only exists
+/// after a [case rule](crate::case) has been applied.
+///
+/// A declaration with no generics is checked by `cargo check`. A generic one
+/// has no payload keys until it is instantiated, so it is checked when the
+/// crate is built, which is [`Keys::REQUIRED`](crate::Keys::REQUIRED)'s tier.
 ///
 /// # Syntax
 ///
@@ -1817,7 +1821,74 @@ macro_rules! __declared_internal_enum {
     ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty { $($body:tt)* }) => {
         $crate::__case_check!($case);
         $crate::__variants_impl!([$($wgen)*] [$case] $ty { $($body)* });
+        $crate::__tag_check!([$($wgen)*] [$tag] $ty { $($body)* });
         $crate::$m!([$($rgen)*] [$($wgen)*] [$case] [$tag] $ty { $($body)* });
+    };
+}
+
+/// Refuse a tag that is also a field of some variant's payload, at the
+/// earliest point the payload's keys are known.
+///
+/// For a declaration with no generics that point is here, in an item-level
+/// `const` whose value is monomorphic and so is evaluated during `cargo
+/// check`. A generic declaration has no keys until it is instantiated, so this
+/// expands to nothing and the write path's `const` block carries the check
+/// instead; see [`__tag_check_generic!`](crate::__tag_check_generic). Exactly
+/// one of the two is live per declaration, so nothing is checked twice.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tag_check {
+    (
+        [] [$tag:literal] $ty:ty {
+            $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
+        }
+    ) => {
+        $( $crate::__tag_check_one!([$tag] $ty, $variant $(($($payload)*))?); )*
+    };
+    ([$($wgen:tt)+] [$tag:literal] $ty:ty { $($body:tt)* }) => {};
+}
+
+/// One variant's share of [`__tag_check!`](crate::__tag_check).
+///
+/// The payload's type is named through the variant's constructor, which is a
+/// value of type `fn(P) -> Self`. That is what makes the check possible at all
+/// without the declaration repeating a type it already gave the enum.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tag_check_one {
+    // Carries nothing, so it shares its object with no members and has nothing
+    // the tag could collide with.
+    ([$tag:literal] $ty:ty, $variant:ident) => {};
+    ([$tag:literal] $ty:ty, $variant:ident ($($payload:tt)*)) => {
+        const _: () = $crate::assert_tag_not_a_field($tag, <$ty>::$variant);
+    };
+}
+
+/// [`__tag_check!`](crate::__tag_check) for a generic declaration, whose
+/// payload keys exist only once instantiated.
+///
+/// Expands to nothing when there are no generics, the item-level check having
+/// already covered that case.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tag_check_generic {
+    ([] [$tag:literal] { $($body:tt)* }) => {};
+    (
+        [$($wgen:tt)+] [$tag:literal] {
+            $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
+        }
+    ) => {
+        $( $crate::__tag_check_generic_one!([$tag] $variant $(($($payload)*))?); )*
+    };
+}
+
+/// One variant's share of [`__tag_check_generic!`](crate::__tag_check_generic).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tag_check_generic_one {
+    ([$tag:literal] $variant:ident) => {};
+    ([$tag:literal] $variant:ident ($($payload:tt)*)) => {
+        $crate::assert_tag_not_a_field($tag, Self::$variant);
     };
 }
 
@@ -2110,9 +2181,14 @@ macro_rules! __json_internal_enum_impls {
             fn write<O: $crate::Options>(&self, w: &mut $crate::json::Writer<'_, O>) {
                 // Named for `__json_enum_impls`'s reason: this is the only
                 // place writing evaluates the map, and so the only place a
-                // generic declaration's duplicate names are caught.
+                // generic declaration's duplicate names are caught. The tag
+                // check rides along for the same reason, a generic payload
+                // having no keys until it is instantiated.
                 const {
                     let _ = <Self as $crate::Variants>::MAP;
+                    $crate::__tag_check_generic!([$($wgen)*] [$tag] {
+                        $($($name =>)? $variant $(($($payload)*))?),*
+                    });
                 };
                 $(
                     $crate::__write_internal_variant!(
@@ -2232,6 +2308,9 @@ macro_rules! __beve_internal_enum_impls {
             fn write<O: $crate::Options>(&self, w: &mut $crate::beve::Writer<'_, O>) {
                 const {
                     let _ = <Self as $crate::Variants>::MAP;
+                    $crate::__tag_check_generic!([$($wgen)*] [$tag] {
+                        $($($name =>)? $variant $(($($payload)*))?),*
+                    });
                 };
                 $(
                     $crate::__write_internal_variant!(

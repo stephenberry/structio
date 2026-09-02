@@ -16,7 +16,7 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 - `Parser::read_object_rest` and `Parser::finish_internally_tagged`, their `Reader` counterparts, and `Writer::write_internally_tagged` in both formats, for hand-written impls of the two new `ReadInternallyTagged` traits. A variant carrying nothing writes through the existing `write_tagged`, the bytes being the same object of one member.
 
-  Note that a tag sharing its name with a payload field writes that name twice. structio reads it back; a last-wins parser does not. The payload's type is not in the declaration, so the macro cannot check this — see [docs/enums.md](docs/enums.md#choose-a-tag-no-payload-uses).
+- A tag that is also a field of a variant's payload is a **compile error**. The two share one object, so it would write the name twice; structio reads that back and a last-wins parser does not, keeping the field and losing the variant. The comparison is of wire names, so a collision that only appears after a case rule is caught too. `cargo check` refuses a declaration with no generics; a generic one is refused when the crate is built, a generic payload having no keys until it is instantiated.
 
 ## [0.2.2] - 2026-09-02
 

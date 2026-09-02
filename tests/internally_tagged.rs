@@ -671,3 +671,89 @@ fn a_document_nested_past_the_limit_is_still_refused() {
         ErrorCode::ExceededMaxDepth
     );
 }
+
+// -----------------------------------------------------------------------
+// The tag may not be a payload's field
+// -----------------------------------------------------------------------
+//
+// The collision itself is a compile error, so it cannot be asserted from here
+// without a `trybuild`-style harness this crate does not carry. What these
+// pin is the other side: the shapes that look like collisions and are not,
+// which is where a check of this kind goes wrong. Each would stop compiling
+// if the comparison were made against Rust field names rather than wire keys,
+// or if unit variants were checked.
+
+#[derive(Default, PartialEq, Debug)]
+struct CamelPayload {
+    kind_of: String,
+}
+structio::object!(CamelPayload as "camelCase" { kind_of });
+
+#[derive(Default, PartialEq, Debug)]
+enum CaseSensitive {
+    #[default]
+    A,
+    B(CamelPayload),
+}
+// The tag is the Rust field's name; the field reaches the wire as `kindOf`,
+// so the two do not collide. Were the check comparing pre-conversion names it
+// would refuse this.
+structio::internally_tagged_enum!(CaseSensitive as tag "kind_of" { A, B(_) });
+
+#[test]
+fn a_tag_matching_a_field_s_rust_name_but_not_its_wire_key_is_fine() {
+    assert_eq!(
+        to_string(&CaseSensitive::B(CamelPayload {
+            kind_of: "x".into()
+        })),
+        r#"{"kind_of":"B","kindOf":"x"}"#
+    );
+    assert_eq!(
+        from_str::<CaseSensitive>(r#"{"kind_of":"B","kindOf":"x"}"#).unwrap(),
+        CaseSensitive::B(CamelPayload {
+            kind_of: "x".into()
+        })
+    );
+}
+
+#[derive(Default, PartialEq, Debug)]
+struct RenamedField {
+    kind: String,
+}
+structio::object!(RenamedField { "k" => kind });
+
+#[derive(Default, PartialEq, Debug)]
+enum MovedOff {
+    #[default]
+    A,
+    B(RenamedField),
+}
+// A per-field rename moves the field off the tag, so `kind` is free again.
+structio::internally_tagged_enum!(MovedOff as tag "kind" { A, B(_) });
+
+#[test]
+fn a_field_renamed_off_the_tag_frees_the_name() {
+    assert_eq!(
+        to_string(&MovedOff::B(RenamedField { kind: "y".into() })),
+        r#"{"kind":"B","k":"y"}"#
+    );
+}
+
+#[derive(Default, PartialEq, Debug)]
+enum AllUnits {
+    #[default]
+    Kind,
+    Other,
+}
+// Every variant carries nothing, so none of them shares its object with any
+// member and the tag may be named whatever it likes.
+structio::internally_tagged_enum!(AllUnits as tag "kind" { Kind, Other });
+
+#[test]
+fn a_variant_carrying_nothing_is_never_a_collision() {
+    assert_eq!(to_string(&AllUnits::Kind), r#"{"kind":"Kind"}"#);
+    assert_eq!(
+        from_str::<AllUnits>(r#"{"kind":"Other"}"#).unwrap(),
+        AllUnits::Other
+    );
+}

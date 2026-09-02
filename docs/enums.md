@@ -234,21 +234,36 @@ from_str::<Shape>(r#"{"radius":1,"kind":"Circle"}"#);   // ExpectedTag, at "radi
 
 ### What a payload may be
 
-An object, and nothing else. The variant's members share one object with the tag, so a payload with no members of its own has nowhere to go: `Sides(u32)` is a compile error naming `WriteObject`, not a runtime surprise. Declare such a payload as a struct, or use `tagged_enum!`, which takes any payload because it gives it an object of its own.
+An object, and nothing else. The variant's members share one object with the tag, so a payload with no members of its own has nowhere to go: `Sides(u32)` is a compile error naming `Keys`, then `WriteObject` and its neighbours, not a runtime surprise. Declare such a payload as a struct, or use `tagged_enum!`, which takes any payload because it gives it an object of its own.
 
 A variant carrying nothing is written as the tag alone. Members beside it are unknown members and meet the reader's policy exactly as a struct's would be: refused under `Standard`, stepped over under `SkipUnknown`.
 
-### Choose a tag no payload uses
+### A tag cannot be a payload's field
 
-The tag shares one object with the payload's members, so a tag whose name is also a payload field writes that name twice:
+The tag shares one object with the payload's members, so a tag whose name is also a payload field would write that name twice:
 
 ```json
 {"kind":"Config","kind":"debug","level":3}
 ```
 
-structio reads this back correctly, because it takes the first member as the tag and hands the rest to the payload. **Nothing else will.** A last-wins parser — `JSON.parse`, and Glaze — sees `kind` as `"debug"` and the variant is gone. Under `RequireKeys` the collision is unsatisfiable from structio's side too: the tag was consumed before the payload was reached, so the payload's own `kind` can never be filled.
+structio would read this back, taking the first member as the tag. **Nothing else would.** A last-wins parser — `JSON.parse`, and Glaze — sees `kind` as `"debug"` and the variant is gone. The field is unreadable here too: the tag is consumed before the payload's members are reached, so under `RequireKeys` it could never be filled.
 
-This is not currently a compile error. The payload's type is deliberately absent from the declaration, so the macro has no name to check its keys against. Pick a tag that no variant's payload declares — `kind`, `type` and `op` are conventional precisely because they are rarely field names.
+**This is a compile error**, so the shape above cannot be written:
+
+```
+error[E0080]: evaluation panicked: structio: the tag of an internally tagged enum is also
+a field of this variant's payload. ...
+  --> src/main.rs:7:1
+   |
+ 7 | structio::internally_tagged_enum!(Setting as tag "kind" { Off, Config(_) });
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: inside `assert_tag_not_a_field::<Debugging, Setting>`
+```
+
+The payload's type is absent from the declaration, so the check reaches it through the variant's constructor, which is a value of type `fn(Payload) -> Self`. What it compares are *wire* names, so a collision that exists only after a case rule has run — a field `kind_of` under `"camelCase"` against a tag `"kindOf"` — is caught as well, and that one is invisible in the Rust source.
+
+A declaration with no generics is refused by `cargo check`. A generic one has no payload keys until it is instantiated, so it is refused when the crate is built, the same tier as a `Keys::REQUIRED` overflow. A variant carrying nothing is never checked: it shares its object with no members.
 
 Everything else on this page carries over. Renaming, case rules (which apply to the variant names, never to the tag key, that being a document key rather than a variant), generics, borrowed payloads, reading into an existing value, and the `json_`/`beve_` single-format variants all work as they do above. And because the result is an ordinary object, the rest of the crate needs to know even less about it than it does about an external tag: a pointer reaches `/kind` and `/radius` in the same object, with no enum-shaped step in the path.
 
