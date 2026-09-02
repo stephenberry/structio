@@ -293,7 +293,7 @@ enum Shape {
 structio::tagged_enum!(Shape { Empty, Sides(_) });
 ```
 
-`Shape::Empty` writes as `"Empty"` and `Shape::Sides(6)` as `{"Sides":6}`. [`unit_enum!`](enums.md#declaring-one) is the same declaration for an enum whose variants all carry nothing, and will not compile if one of them does. [`internally_tagged_enum!`](enums.md#internal-tagging) puts the name inside the payload's object instead of wrapping it, which is the convention most JSON APIs use.
+`Shape::Empty` writes as `"Empty"` and `Shape::Sides(6)` as `{"Sides":6}`. [`unit_enum!`](enums.md#declaring-one) is the same declaration for an enum whose variants all carry nothing, and will not compile if one of them does. A [tag clause](enums.md#internal-tagging), `tagged_enum!(Shape as tag "kind" { .. })`, puts the name inside the payload's object instead of wrapping it, which is the convention most JSON APIs use.
 
 Enums have a page of their own: **[Enums](enums.md)** covers the wire forms and which of them reading accepts, renaming, generics and borrowing, what is refused and with which error, how the policies meet a tag, the BEVE string-array form a unit enum takes, internal tagging and why its tag has to come first, and how the rest of the crate walks a tag.
 

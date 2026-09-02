@@ -8,7 +8,7 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ### Added
 
-- **`internally_tagged_enum!`**, a third tagging convention: the variant name goes inside the payload's object as a member, rather than wrapping it. `{"kind":"Circle","radius":1}` where `tagged_enum!` writes `{"Circle":{"radius":1}}`. This is what most JSON APIs use, and the only form here that a C++ Glaze `std::variant` can be made to agree with, external tagging having nowhere to put the payload's own keys. `json_` and `beve_` variants as usual.
+- **Internal tagging**, a second convention for `tagged_enum!`, asked for with a tag clause: `tagged_enum!(Shape as tag "kind" { .. })`. The variant name goes inside the payload's object as a member rather than wrapping it, giving `{"kind":"Circle","radius":1}` where the clause-free form writes `{"Circle":{"radius":1}}`. This is what most JSON APIs use, and the only form here that a C++ Glaze `std::variant` can be made to agree with, external tagging having nowhere to put the payload's own keys. The clause works on `json_tagged_enum!` and `beve_tagged_enum!` too.
 
   **The tag has to be the object's first member**, and a document that puts it elsewhere is the new `ErrorCode::ExpectedTag`, reported against the offending key. Reading is one pass with no lookahead, so a tag arriving after the members it gives meaning to could only be used by holding the object or walking it twice. Writing always emits the tag first, so this crate's own output round-trips unconditionally, as does any producer that emits its tag first — the conventional ordering. The refusal is loud and positioned rather than a misparse.
 

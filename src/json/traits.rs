@@ -273,9 +273,9 @@ pub trait ReadEnum<'de>: Variants + Sized {
 /// Variant-by-variant reading for an internally tagged enum.
 ///
 /// The counterpart of [`ReadEnum`] for a type declared with
-/// [`internally_tagged_enum!`](crate::internally_tagged_enum). There is one
-/// method rather than two because there is one wire form: an object whose
-/// first member is the tag, and whose remaining members are the variant's own.
+/// [`tagged_enum!`](crate::tagged_enum)`(.. as tag "..")`. There is one method
+/// rather than two because there is one wire form: an object whose first
+/// member is the tag, and whose remaining members are the variant's own.
 ///
 /// [`Parser::read_internally_tagged`] has already matched the tag and is
 /// sitting on the first byte of its value, so what reaches

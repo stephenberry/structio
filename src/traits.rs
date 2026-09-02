@@ -274,8 +274,8 @@ pub struct Same;
 /// because the call sites are const contexts holding the literal, which is
 /// what keeps this free of any trait the enum would have to implement.
 ///
-/// [`internally_tagged_enum!`](crate::internally_tagged_enum) calls it from an
-/// item-level `const`, so for a declaration with no generics it is evaluated
+/// [`tagged_enum!`](crate::tagged_enum) calls it, for a declaration carrying a
+/// tag clause, from an item-level `const`, so with no generics it is evaluated
 /// by `cargo check`. A generic one has no keys until it is instantiated, and
 /// is checked from the write path's own `const` block instead, which is
 /// [`Keys::REQUIRED`]'s tier: reported when the crate is built.

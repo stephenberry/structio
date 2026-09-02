@@ -32,7 +32,7 @@ enum Shape {
     Circle(Circle),
     Rect(Rect),
 }
-structio::internally_tagged_enum!(Shape as tag "kind" {
+structio::tagged_enum!(Shape as tag "kind" {
     Empty,
     Circle(_),
     Rect(_)
@@ -240,7 +240,7 @@ enum Op {
     Noop,
     ReadFile(Path),
 }
-structio::internally_tagged_enum!(Op as "kebab-case" tag "op" {
+structio::tagged_enum!(Op as "kebab-case" tag "op" {
     Noop,
     ReadFile(_)
 });
@@ -271,7 +271,7 @@ enum Renamed {
     A,
     B(Circle),
 }
-structio::internally_tagged_enum!(Renamed as tag "t" {
+structio::tagged_enum!(Renamed as tag "t" {
     "alpha" => A,
     "beta" => B(_)
 });
@@ -390,7 +390,7 @@ enum Holder {
     None,
     Some(Maybe),
 }
-structio::internally_tagged_enum!(Holder as tag "k" { None, Some(_) });
+structio::tagged_enum!(Holder as tag "k" { None, Some(_) });
 
 #[test]
 fn skip_null_drops_a_payload_member_and_keeps_the_tag() {
@@ -519,7 +519,7 @@ enum Response<T> {
     Empty,
     Page(Page<T>),
 }
-structio::internally_tagged_enum!([T: structio::ReadWrite + Default] Response<T> as tag "kind" {
+structio::tagged_enum!([T: structio::ReadWrite + Default] Response<T> as tag "kind" {
     Empty,
     Page(_)
 });
@@ -546,7 +546,7 @@ enum Event<'a> {
     Tick,
     Named(Borrowed<'a>),
 }
-structio::internally_tagged_enum!(['de] Event<'de> as tag "kind" { Tick, Named(_) });
+structio::tagged_enum!(['de] Event<'de> as tag "kind" { Tick, Named(_) });
 
 #[test]
 fn a_payload_may_borrow_from_the_document() {
@@ -569,7 +569,7 @@ enum JsonOnly {
     A,
     B(Circle),
 }
-structio::json_internally_tagged_enum!(JsonOnly as tag "t" { A, B(_) });
+structio::json_tagged_enum!(JsonOnly as tag "t" { A, B(_) });
 
 #[derive(Default, PartialEq, Debug)]
 enum BeveOnly {
@@ -577,7 +577,7 @@ enum BeveOnly {
     A,
     B(Circle),
 }
-structio::beve_internally_tagged_enum!(BeveOnly as tag "t" { A, B(_) });
+structio::beve_tagged_enum!(BeveOnly as tag "t" { A, B(_) });
 
 #[test]
 fn one_format_at_a_time_generates_only_that_format() {
@@ -638,7 +638,7 @@ enum Node {
     Leaf,
     Branch(Wrapper),
 }
-structio::internally_tagged_enum!(Node as tag "t" { Leaf, Branch(_) });
+structio::tagged_enum!(Node as tag "t" { Leaf, Branch(_) });
 
 #[test]
 fn nesting_balances_the_depth_counter() {
@@ -698,7 +698,7 @@ enum CaseSensitive {
 // The tag is the Rust field's name; the field reaches the wire as `kindOf`,
 // so the two do not collide. Were the check comparing pre-conversion names it
 // would refuse this.
-structio::internally_tagged_enum!(CaseSensitive as tag "kind_of" { A, B(_) });
+structio::tagged_enum!(CaseSensitive as tag "kind_of" { A, B(_) });
 
 #[test]
 fn a_tag_matching_a_field_s_rust_name_but_not_its_wire_key_is_fine() {
@@ -729,7 +729,7 @@ enum MovedOff {
     B(RenamedField),
 }
 // A per-field rename moves the field off the tag, so `kind` is free again.
-structio::internally_tagged_enum!(MovedOff as tag "kind" { A, B(_) });
+structio::tagged_enum!(MovedOff as tag "kind" { A, B(_) });
 
 #[test]
 fn a_field_renamed_off_the_tag_frees_the_name() {
@@ -747,7 +747,7 @@ enum AllUnits {
 }
 // Every variant carries nothing, so none of them shares its object with any
 // member and the tag may be named whatever it likes.
-structio::internally_tagged_enum!(AllUnits as tag "kind" { Kind, Other });
+structio::tagged_enum!(AllUnits as tag "kind" { Kind, Other });
 
 #[test]
 fn a_variant_carrying_nothing_is_never_a_collision() {

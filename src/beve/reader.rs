@@ -837,7 +837,8 @@ impl<'de, O: Options> Reader<'de, O> {
         }
     }
 
-    /// Read a BEVE object into a type declared with `internally_tagged_enum!`.
+    /// Read a BEVE object into a type declared with a tag clause:
+    /// `tagged_enum!(.. as tag "..")`.
     ///
     /// The mirror of
     /// [`json::Parser::read_internally_tagged`](crate::json::Parser::read_internally_tagged),

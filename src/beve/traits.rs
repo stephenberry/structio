@@ -447,8 +447,8 @@ pub trait ReadEnum<'de>: Variants + Sized {
 /// Variant-by-variant reading for an internally tagged enum.
 ///
 /// The counterpart of [`ReadEnum`] for a type declared with
-/// [`internally_tagged_enum!`](crate::internally_tagged_enum), and the mirror
-/// of [`json::ReadInternallyTagged`](crate::json::ReadInternallyTagged). One
+/// [`tagged_enum!`](crate::tagged_enum)`(.. as tag "..")`, and the mirror of
+/// [`json::ReadInternallyTagged`](crate::json::ReadInternallyTagged). One
 /// method rather than two, there being one wire form: an object whose first
 /// member is the tag, and whose remaining members are the variant's own.
 pub trait ReadInternallyTagged<'de>: Variants + Sized {

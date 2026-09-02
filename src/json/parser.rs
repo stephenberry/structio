@@ -567,7 +567,8 @@ impl<'de, O: Options> Parser<'de, O> {
         Err(ErrorCode::UnknownVariant)
     }
 
-    /// Read a JSON object into a type declared with `internally_tagged_enum!`.
+    /// Read a JSON object into a type declared with a tag clause:
+    /// `tagged_enum!(.. as tag "..")`.
     ///
     /// One form rather than [`read_enum`](Self::read_enum)'s two: an object
     /// whose first member is the tag naming the variant, and whose remaining

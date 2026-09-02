@@ -83,7 +83,8 @@ pub enum ErrorCode {
     ExpectedVariant,
     /// An internally tagged enum's object did not begin with its tag.
     ///
-    /// [`internally_tagged_enum!`](crate::internally_tagged_enum) reads in one
+    /// An internally tagged enum, declared
+    /// [`tagged_enum!`](crate::tagged_enum)`(.. as tag "..")`, reads in one
     /// pass, so the member deciding which variant this is has to arrive before
     /// the members whose meaning it decides. An object whose first member is
     /// some other key is refused here rather than searched: finding a later tag
