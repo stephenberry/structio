@@ -226,6 +226,10 @@ impl<'a, O: Options> Writer<'a, O> {
     }
 
     /// The bytes written so far, or with a sink, the bytes not yet drained.
+    ///
+    /// With [`Writer::appending`] the bytes handed in are in front of them,
+    /// those being in the buffer too. This is the whole buffer either way,
+    /// which is what [`Writer::into_vec`] hands back.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf
@@ -286,6 +290,11 @@ impl<'a, O: Options> Writer<'a, O> {
         self.buf.len()
     }
 
+    /// Whether the buffer holds nothing.
+    ///
+    /// [`Writer::len`]'s companion, and it counts what that counts: a writer
+    /// built by [`Writer::appending`] over a buffer with something in it is
+    /// not empty before it writes a byte of its own.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()

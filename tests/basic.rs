@@ -507,7 +507,10 @@ fn append_keeps_the_buffers_allocation() {
     *buf.last_mut().unwrap() = b']';
 
     assert_eq!(structio::from_slice::<Vec<Person>>(&buf).unwrap().len(), 10);
-    // The allocation survived every call: no second buffer, no copy out of it.
+    // Ten appends into a buffer with the room for them did not move it. That
+    // the appends staged nothing on the side is a claim about the allocator
+    // rather than about this pointer, and `tests/memory.rs` is where it is
+    // made.
     assert!(std::ptr::eq(buf.as_ptr(), ptr));
 }
 
