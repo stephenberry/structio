@@ -4,6 +4,18 @@ Notable changes to structio. The format follows [Keep a Changelog](https://keepa
 
 Before 1.0 the API is not frozen: a minor bump may break it, and what broke is listed here.
 
+## [Unreleased]
+
+### Added
+
+- **`internally_tagged_enum!`**, a third tagging convention: the variant name goes inside the payload's object as a member, rather than wrapping it. `{"kind":"Circle","radius":1}` where `tagged_enum!` writes `{"Circle":{"radius":1}}`. This is what most JSON APIs use, and the only form here that a C++ Glaze `std::variant` can be made to agree with, external tagging having nowhere to put the payload's own keys. `json_` and `beve_` variants as usual.
+
+  **The tag has to be the object's first member**, and a document that puts it elsewhere is the new `ErrorCode::ExpectedTag`, reported against the offending key. Reading is one pass with no lookahead, so a tag arriving after the members it gives meaning to could only be used by holding the object or walking it twice. Writing always emits the tag first, so this crate's own output round-trips unconditionally, as does any producer that emits its tag first — the conventional ordering. The refusal is loud and positioned rather than a misparse.
+
+  A payload must be an object (a compile error naming `WriteObject` otherwise), since its members share the object with the tag. Everything else carries over: renaming, case rules, generics, borrowed payloads, reading into an existing value, and the policies. The result is an ordinary object, so pointers, validation and transcoding walk it with no knowledge of enums at all.
+
+- `Parser::read_object_rest`, `Parser::finish_tagged_object`, `Reader::read_object_rest` and `Reader::finish_tagged_object`, for hand-written impls of the two new `ReadInternallyTagged` traits.
+
 ## [0.2.2] - 2026-09-02
 
 ### Changed

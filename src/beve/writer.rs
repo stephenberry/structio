@@ -860,6 +860,66 @@ impl<'a, O: Options> Writer<'a, O> {
         value.write(self);
     }
 
+    /// Write an internally tagged variant carrying a value: an object whose
+    /// first member is the tag and whose rest are the payload's own.
+    ///
+    /// `key` is the pre-encoded `SIZE | KEY` of the tag, and `name` the
+    /// variant's name. The member count is the payload's plus one for the tag,
+    /// so [`Options::SKIP_NULL`] is accounted for exactly as
+    /// [`Self::write_object`] accounts for it: through
+    /// [`WriteObject::count_fields`], whose answer has to match what
+    /// [`WriteObject::write_fields`] then writes.
+    ///
+    /// The tag goes first because that is where the reader requires it. BEVE
+    /// counts its members rather than closing them with a brace, so a reader
+    /// could in principle take them in any order; requiring the tag first
+    /// anyway is what keeps one declaration meaning one thing in both formats.
+    #[inline]
+    pub fn write_internally_tagged<T: WriteObject + ?Sized>(
+        &mut self,
+        key: &[u8],
+        name: &str,
+        value: &T,
+    ) {
+        let declared = value.count_fields::<O>() + 1;
+        self.push(header::OBJECT);
+        self.size(declared as u64);
+        // The tag is a member and is counted as one, so the payload's own
+        // members are counted on top of it rather than from zero.
+        #[cfg(debug_assertions)]
+        let outer = core::mem::replace(&mut self.members, 1);
+        self.raw(key);
+        name.write(self);
+        value.write_fields(self);
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(
+                self.members,
+                declared,
+                "structio: `{}` wrote {} members after declaring {}, which would \
+                 corrupt the document; `count_fields` must agree with `write_fields`",
+                core::any::type_name::<T>(),
+                self.members,
+                declared,
+            );
+            self.members = outer;
+        }
+    }
+
+    /// Write an internally tagged variant that carries nothing: an object
+    /// holding the tag and no more.
+    ///
+    /// Unlike [`Self::write_tagged`]'s bare-name form there is no shorter
+    /// spelling to fall back on: an internally tagged value is an object
+    /// whether or not the variant has anything in it.
+    #[inline]
+    pub fn write_internally_tagged_unit(&mut self, key: &[u8], name: &str) {
+        self.push(header::OBJECT);
+        self.size(1);
+        self.raw(key);
+        name.write(self);
+    }
+
     /// Write a struct as a BEVE array.
     ///
     /// The positional counterpart of [`Self::write_object`]. The element count

@@ -107,8 +107,8 @@ pub use impls::{FromBeveKey, NumericBytes, ToBeveKey};
 pub use reader::{Key, Reader};
 pub use stream::{Documents, Feed, Iter, Mode, from_reader_array, read_array_into};
 pub use traits::{
-    Read, ReadArray, ReadAs, ReadEnum, ReadKeyAs, ReadObject, ReadWrite, Write, WriteArray,
-    WriteAs, WriteKeyAs, WriteObject,
+    Read, ReadArray, ReadAs, ReadEnum, ReadInternallyTagged, ReadKeyAs, ReadObject, ReadWrite,
+    Write, WriteArray, WriteAs, WriteKeyAs, WriteObject,
 };
 pub use writer::Writer;
 

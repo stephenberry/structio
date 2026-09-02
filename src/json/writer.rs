@@ -743,6 +743,49 @@ impl<'a, O: Options> Writer<'a, O> {
         self.close(b'}');
     }
 
+    /// Write an internally tagged variant carrying a value:
+    /// `{"tag":"Name",...}`, the payload's own members following the tag.
+    ///
+    /// `prefix` is the pre-quoted tag key with its colon and `name` the
+    /// variant's name, both built at compile time by the macro. The tag is
+    /// written first because that is where the reader requires it: this crate
+    /// reads in one pass, so a tag after the members it describes could not be
+    /// used without a second look at them.
+    ///
+    /// [`Options::SKIP_NULL`] reaches the payload's members, which is what it
+    /// means everywhere else, but not the tag: dropping that would leave an
+    /// object naming no variant.
+    #[inline]
+    pub fn write_internally_tagged<T: WriteObject + ?Sized>(
+        &mut self,
+        prefix: &str,
+        name: &str,
+        value: &T,
+    ) {
+        self.open(b'{');
+        self.key(prefix);
+        self.write_str(name);
+        self.push(b',');
+        value.write_fields(self);
+        self.close(b'}');
+    }
+
+    /// Write an internally tagged variant that carries nothing: `{"tag":"Name"}`.
+    ///
+    /// The object holds the tag and no more, which is what
+    /// [`Parser::read_internally_tagged`](crate::json::Parser::read_internally_tagged)
+    /// reads back. Unlike [`Self::write_tagged`]'s bare-name form there is no
+    /// shorter spelling to fall back on: an internally tagged value is an
+    /// object whether or not the variant has anything in it.
+    #[inline]
+    pub fn write_internally_tagged_unit(&mut self, prefix: &str, name: &str) {
+        self.open(b'{');
+        self.key(prefix);
+        self.write_str(name);
+        self.push(b',');
+        self.close(b'}');
+    }
+
     /// Write a struct as a JSON array.
     ///
     /// The bracket counterpart of [`Self::write_object`], down to the trailing

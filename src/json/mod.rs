@@ -24,8 +24,8 @@ pub use stream::{
     to_writer_buffered_with, to_writer_with,
 };
 pub use traits::{
-    Read, ReadArray, ReadAs, ReadEnum, ReadKeyAs, ReadObject, ReadWrite, Write, WriteArray,
-    WriteAs, WriteKeyAs, WriteObject,
+    Read, ReadArray, ReadAs, ReadEnum, ReadInternallyTagged, ReadKeyAs, ReadObject, ReadWrite,
+    Write, WriteArray, WriteAs, WriteKeyAs, WriteObject,
 };
 pub use writer::{Writer, quoted_key};
 

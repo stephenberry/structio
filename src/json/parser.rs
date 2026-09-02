@@ -13,7 +13,7 @@
 use core::marker::PhantomData;
 
 use crate::error::{ErrorCode, PResult};
-use crate::json::traits::{Read, ReadArray, ReadEnum, ReadObject};
+use crate::json::traits::{Read, ReadArray, ReadEnum, ReadInternallyTagged, ReadObject};
 use crate::num::atof::{parse_float, scan_number};
 use crate::num::atoi::{parse_i64, parse_u64, reject_float_tail};
 use crate::options::{Options, Standard};
@@ -334,6 +334,68 @@ impl<'de, O: Options> Parser<'de, O> {
             return self.require_fields::<T>(seen, open);
         }
 
+        seen = self.object_members::<T>(value, seen)?;
+        self.leave();
+        self.require_fields::<T>(seen, open)
+    }
+
+    /// Read the members of an object whose opening brace, and at least one
+    /// member, are already consumed.
+    ///
+    /// What [`Self::read_internally_tagged`] leaves behind: the tag has been
+    /// taken, and the rest of the object is the variant's payload. The cursor
+    /// sits where that tag's value ended, so the first thing to settle is
+    /// whether a comma follows it or the object is over.
+    ///
+    /// `open` is the offset of the object's opening brace, carried in because
+    /// a [`MissingKey`](ErrorCode::MissingKey) is reported against the object
+    /// rather than against the byte that closed it, and this is called after
+    /// the caller has walked past it. `enter` is the caller's too, and so is
+    /// balanced here by the `leave`.
+    pub fn read_object_rest<T: ReadObject<'de>>(
+        &mut self,
+        value: &mut T,
+        open: usize,
+    ) -> PResult<()> {
+        let seen = if self.comma_or_close(b'}')? {
+            self.object_members::<T>(value, 0)?
+        } else {
+            0
+        };
+        self.leave();
+        self.require_fields::<T>(seen, open)
+    }
+
+    /// Consume the rest of an object that has no fields to fill: the form an
+    /// internally tagged variant carrying nothing takes.
+    ///
+    /// The tag was the whole value, so anything after it is an unknown member
+    /// and meets the policy that governs one. `{"type":"a"}` is the ordinary
+    /// case and costs a single `comma_or_close`.
+    pub fn finish_tagged_object(&mut self) -> PResult<()> {
+        while self.comma_or_close(b'}')? {
+            self.expect(b'"', ErrorCode::ExpectedQuote)?;
+            if O::ERROR_ON_UNKNOWN_KEYS {
+                let key = self.idx;
+                self.skip_string_body()?;
+                self.idx = key;
+                return Err(ErrorCode::UnknownKey);
+            }
+            self.skip_unknown_member()?;
+        }
+        self.leave();
+        Ok(())
+    }
+
+    /// The member loop [`Self::read_object`] and [`Self::read_object_rest`]
+    /// share, the cursor sitting on a member's opening quote.
+    ///
+    /// Returns the fields filled, for the caller to check against the ones
+    /// that had to be. The closing brace is consumed here; the `leave` that
+    /// balances the caller's `enter` is not, both callers having a
+    /// [`require_fields`](Self::require_fields) to run after it.
+    #[inline]
+    fn object_members<T: ReadObject<'de>>(&mut self, value: &mut T, mut seen: u64) -> PResult<u64> {
         let map = T::MAP;
         let n = map.n as usize;
 
@@ -367,8 +429,7 @@ impl<'de, O: Options> Parser<'de, O> {
             }
 
             if !self.comma_or_close(b'}')? {
-                self.leave();
-                return self.require_fields::<T>(seen, open);
+                return Ok(seen);
             }
         }
     }
@@ -479,6 +540,74 @@ impl<'de, O: Options> Parser<'de, O> {
         self.skip_string_body()?;
         // Back to the first byte of the name, so the position this error
         // carries names what was not recognized.
+        self.idx = at;
+        Err(ErrorCode::UnknownVariant)
+    }
+
+    /// Read a JSON object into a type declared with `internally_tagged_enum!`.
+    ///
+    /// One form rather than [`read_enum`](Self::read_enum)'s two: an object
+    /// whose first member is the tag naming the variant, and whose remaining
+    /// members are that variant's own fields.
+    ///
+    /// **The tag has to come first.** This crate reads in one pass, and a tag
+    /// arriving after the members it gives meaning to could only be used by
+    /// holding the object somewhere or by walking it twice. An object that
+    /// begins with any other key is [`ErrorCode::ExpectedTag`], reported
+    /// against that key, rather than searched for a tag further in.
+    ///
+    /// A tag that is first and names no variant is
+    /// [`ErrorCode::UnknownVariant`] under every policy, for the reason
+    /// [`read_enum`](Self::read_enum) gives.
+    pub fn read_internally_tagged<T: ReadInternallyTagged<'de>>(
+        &mut self,
+        value: &mut T,
+    ) -> PResult<()> {
+        self.skip_ws();
+        // Where the object begins, so a payload missing a required member is
+        // reported against the object, as it is for a struct.
+        let open = self.idx;
+        self.expect(b'{', ErrorCode::ExpectedBrace)?;
+        self.enter()?;
+        self.skip_ws();
+
+        // No members at all: there is no tag, and so no variant. Reported
+        // against the object, there being no member to point at.
+        if self.peek() == Some(b'}') {
+            self.idx = open;
+            return Err(ErrorCode::ExpectedTag);
+        }
+
+        // Where the first member's key begins, which is what a tag that is not
+        // here is reported against.
+        let first = self.idx;
+        self.expect(b'"', ErrorCode::ExpectedQuote)?;
+        if !self.match_key(T::TAG) {
+            self.idx = first;
+            return Err(ErrorCode::ExpectedTag);
+        }
+        self.colon()?;
+        // The tag's value names the variant, so it is a string or it is
+        // nothing this can dispatch on. Reported against the whole member: the
+        // key was right and the value under it was not a name.
+        if self.peek() != Some(b'"') {
+            self.idx = first;
+            return Err(ErrorCode::ExpectedTag);
+        }
+        self.idx += 1;
+
+        // From here the generated arm owns the rest of the object, closing
+        // brace included, because only it knows the payload's type.
+        let map = T::MAP;
+        let at = self.idx;
+        let index = map.lookup(T::VARIANTS, self.rest());
+        if index < map.n as usize && T::read_variant(value, index, self, open)? {
+            return Ok(());
+        }
+        // A name nothing claimed, told apart from a truncated one exactly as
+        // `dispatch_variant` tells them apart, and for the same reason.
+        self.idx = at;
+        self.skip_string_body()?;
         self.idx = at;
         Err(ErrorCode::UnknownVariant)
     }

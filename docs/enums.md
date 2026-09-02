@@ -6,6 +6,8 @@ That is the one design decision everything else on this page follows from. BEVE 
 
 ## Two wire forms, and no third
 
+Two forms for a variant declared with `unit_enum!` or `tagged_enum!`, which is what the rest of this page is about until [Internal tagging](#internal-tagging). That is a separate declaration with a wire form of its own, where the name goes inside the payload's object rather than wrapping it.
+
 | The variant | Is written as | Example |
 |---|---|---|
 | Carries nothing | Its name, as a string | `"Empty"` |
@@ -190,6 +192,53 @@ structio::from_beve_at::<f64>(&bytes, "/shape/Circle/radius")?;
 ```
 
 Tags stream like any other value, in either format, including across a chunk boundary that cuts one in half.
+
+## Internal tagging
+
+The two forms above are *external* tagging: the name wraps the payload. `internally_tagged_enum!` puts the name **inside** the payload's object instead, as a member beside the payload's own:
+
+```rust
+#[derive(Default)]
+struct Circle { radius: f64 }
+structio::object!(Circle { radius });
+
+#[derive(Default)]
+enum Shape {
+    #[default]
+    Empty,
+    Circle(Circle),
+}
+
+structio::internally_tagged_enum!(Shape as tag "kind" { Empty, Circle(_) });
+```
+
+| The variant | External tagging | Internal tagging |
+|---|---|---|
+| Carries nothing | `"Empty"` | `{"kind":"Empty"}` |
+| Carries a value | `{"Circle":{"radius":1}}` | `{"kind":"Circle","radius":1}` |
+
+This is the convention most JSON APIs settled on, and the one a C++ Glaze `std::variant` with a declared tag produces. It is the only form here that a deduced variant can be made to agree with: external tagging has nowhere to put the payload's own keys.
+
+### The tag has to come first
+
+**A document whose object begins with any other key is `ExpectedTag`.** This crate reads in one pass with no lookahead and no buffering, so the member deciding which variant is being read has to arrive before the members whose meaning it decides. Finding a tag further in means holding the object somewhere or walking it twice, and neither is a thing this crate does.
+
+The restriction is on reading. Writing always puts the tag first, so a value this crate wrote reads back unconditionally, and so does one from any producer that emits its tag first — the conventional ordering, and what a declaration-ordered serializer does by default. A producer that puts it last is refused, loudly and with the offending key's position, rather than misread:
+
+```rust
+from_str::<Shape>(r#"{"kind":"Circle","radius":1}"#)?;  // reads
+from_str::<Shape>(r#"{"radius":1,"kind":"Circle"}"#);   // ExpectedTag, at "radius"
+```
+
+`ExpectedTag` also covers an object with no members and a tag whose value is not a string. Which of the three it was is not distinguished, because distinguishing them is the search being refused. A tag that *is* first and names nothing is `UnknownVariant` instead: it was found, and its value is not a variant.
+
+### What a payload may be
+
+An object, and nothing else. The variant's members share one object with the tag, so a payload with no members of its own has nowhere to go: `Sides(u32)` is a compile error naming `WriteObject`, not a runtime surprise. Declare such a payload as a struct, or use `tagged_enum!`, which takes any payload because it gives it an object of its own.
+
+A variant carrying nothing is written as the tag alone. Members beside it are unknown members and meet the reader's policy exactly as a struct's would be: refused under `Standard`, stepped over under `SkipUnknown`.
+
+Everything else on this page carries over. Renaming, case rules (which apply to the variant names, never to the tag key, that being a document key rather than a variant), generics, borrowed payloads, reading into an existing value, and the `json_`/`beve_` single-format variants all work as they do above. And because the result is an ordinary object, the rest of the crate needs to know even less about it than it does about an external tag: a pointer reaches `/kind` and `/radius` in the same object, with no enum-shaped step in the path.
 
 ## See also
 

@@ -444,6 +444,47 @@ pub trait ReadEnum<'de>: Variants + Sized {
     ) -> PResult<bool>;
 }
 
+/// Variant-by-variant reading for an internally tagged enum.
+///
+/// The counterpart of [`ReadEnum`] for a type declared with
+/// [`internally_tagged_enum!`](crate::internally_tagged_enum), and the mirror
+/// of [`json::ReadInternallyTagged`](crate::json::ReadInternallyTagged). One
+/// method rather than two, there being one wire form: an object whose first
+/// member is the tag, and whose remaining members are the variant's own.
+pub trait ReadInternallyTagged<'de>: Variants + Sized {
+    /// The key that carries the variant name, and which every document must
+    /// put first.
+    const TAG: &'static str;
+
+    /// Take variant `index`, the reader positioned on the members that follow
+    /// the tag.
+    ///
+    /// `name` is the tag's value, already delimited by its length prefix.
+    /// `remaining` is how many members of the object are left after the tag,
+    /// which is what says where the object ends: BEVE counts its members up
+    /// front rather than closing them with a brace.
+    ///
+    /// The implementation reads those members, a variant carrying a value into
+    /// its payload and one carrying nothing over them. Returns `false` if
+    /// `name` did not match, which the caller reports as
+    /// [`ErrorCode::UnknownVariant`](crate::ErrorCode::UnknownVariant).
+    ///
+    /// `open` is the offset of the object's header byte, carried for
+    /// [`json::ReadInternallyTagged::read_variant`]'s reason: a
+    /// [`MissingKey`](crate::ErrorCode::MissingKey) names the object it is
+    /// missing from, and the cursor is past it by now.
+    ///
+    /// [`json::ReadInternallyTagged::read_variant`]: crate::json::ReadInternallyTagged::read_variant
+    fn read_variant<O: Options>(
+        &mut self,
+        index: usize,
+        name: &[u8],
+        r: &mut Reader<'de, O>,
+        remaining: usize,
+        open: usize,
+    ) -> PResult<bool>;
+}
+
 /// Convenience bound for generic containers: readable from any BEVE input, and
 /// writable.
 ///
