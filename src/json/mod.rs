@@ -169,6 +169,41 @@ pub fn write_into_with<O: Options, T: Write + ?Sized>(value: &T, out: &mut Strin
     *out = w.into_string();
 }
 
+/// Serialize a value after what a buffer already holds.
+///
+/// [`write_into`] replaces the buffer's contents, so a document that has to
+/// sit behind something -- a protocol header, or the entries already written
+/// into a listing -- has until now needed a second buffer and a copy out of
+/// it. This writes past what is there instead, into the one allocation, and is
+/// the JSON counterpart of [`beve::append`](crate::beve::append).
+///
+/// The bytes in front are neither examined nor required to be text, which is
+/// why this takes the buffer as bytes. [`Writer::appending`] is the same thing
+/// with the writer in hand, and is the way to append into a `String`.
+///
+/// ```
+/// # #[derive(Default)]
+/// # struct Reading { id: u32 }
+/// # structio::object!(Reading { id });
+/// let mut frame = vec![0u8; 8]; // a header, already written
+/// structio::append(&Reading { id: 7 }, &mut frame);
+///
+/// assert_eq!(&frame[8..], br#"{"id":7}"#);
+/// ```
+#[inline]
+pub fn append<T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
+    append_with::<Standard, T>(value, out);
+}
+
+/// [`append`] under an explicit [write policy](crate::Options).
+#[inline]
+pub fn append_with<O: Options, T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
+    let buf = core::mem::take(out);
+    let mut w = Writer::<O>::appending(buf);
+    value.write(&mut w);
+    *out = w.into_vec();
+}
+
 /// Serialize to a byte vector.
 #[inline]
 pub fn to_vec<T: Write + ?Sized>(value: &T) -> Vec<u8> {

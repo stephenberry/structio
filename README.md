@@ -103,6 +103,7 @@ The crate root carries the JSON entry points unqualified and the BEVE ones with 
 | `to_string_with::<O, T>(&T) -> String` | Serialize under a [write policy](docs/options.md): indented, or with nulls left out. |
 | `to_vec(&T) -> Vec<u8>` | Serialize to bytes. |
 | `write_into(&T, &mut String)` | Serialize into an existing buffer, keeping its allocation. |
+| `append(&T, &mut Vec<u8>)` | Serialize after what a buffer already holds, into the one allocation. |
 | `to_writer(&T, impl io::Write)` | Serialize into a sink, draining as it goes. |
 | `from_reader::<T>(impl io::Read)` | Read a whole document from a reader, then parse. |
 | `prettify(&str) -> Result<String>` | Lay out JSON text that did not come from a `Write` impl. |
@@ -124,6 +125,7 @@ The crate root carries the JSON entry points unqualified and the BEVE ones with 
 | `to_beve(&T) -> Vec<u8>` | Serialize. |
 | `write_beve_into(&T, &mut Vec<u8>)` | Serialize into an existing buffer, keeping its allocation. |
 | `to_beve_writer(&T, impl io::Write)` | Serialize into a sink, draining as it goes. |
+| `append_beve(&T, &mut Vec<u8>)` | Serialize after what a buffer already holds. |
 | `append_beve_aligned(&T, &mut Vec<u8>)` | Serialize after what a buffer holds, padded against its length. |
 | `beve_size(&T) -> usize` | The length `to_beve` would produce, without producing it. |
 | `beve_size_aligned_after(&T, usize) -> usize` | The same for an aligned body landing behind a prefix. |

@@ -76,6 +76,18 @@ pub struct Writer<'a, O: Options = Standard> {
     /// makes `limit` collapse to the capacity and every drain a no-op.
     threshold: usize,
     sink: Option<Sink<'a>>,
+    /// Where this writer's own output begins.
+    ///
+    /// Zero for every writer that starts from an empty buffer, and the length
+    /// of the buffer handed to [`Writer::appending`] otherwise. Those leading
+    /// bytes are the one part of the buffer this writer did not produce, and
+    /// so the one part whose UTF-8 is not known by construction;
+    /// [`Writer::into_string`] is where that matters, and slices the buffer
+    /// here. That index holds: the only append path that shortens the buffer
+    /// is the closing byte overwriting a container's last comma, and a
+    /// container always wrote its opening byte first, so a writer never cuts
+    /// back past its own first byte.
+    text_from: usize,
     /// Nesting depth, for indentation. Only ever read under
     /// [`Options::PRETTY`], and only ever updated by a container that breaks
     /// its contents across lines, so a compact writer does not track it and an
@@ -119,26 +131,56 @@ impl<O: Options> Default for Writer<'static, O> {
 impl<O: Options> Writer<'static, O> {
     #[inline]
     pub fn new() -> Self {
-        Writer::from_buf(Vec::new())
+        Writer::appending(Vec::new())
     }
 
     #[inline]
     pub fn with_capacity(n: usize) -> Self {
-        Writer::from_buf(Vec::with_capacity(n))
+        Writer::appending(Vec::with_capacity(n))
     }
 
     /// Reuse an existing buffer, discarding whatever it held.
+    ///
+    /// [`Self::appending`] is the one that keeps it.
     #[inline]
     pub fn from_vec(mut buf: Vec<u8>) -> Self {
         buf.clear();
-        Writer::from_buf(buf)
+        Writer::appending(buf)
     }
 
+    /// Write after what a buffer already holds, rather than over it.
+    ///
+    /// [`Self::from_vec`] discards the contents; this keeps them and writes
+    /// past them. A document that has to sit behind something -- a protocol
+    /// header, or the entries already written into a listing -- then costs one
+    /// buffer rather than a second buffer and a copy out of it.
+    /// [`json::append`](crate::json::append) is this with the writer kept out
+    /// of sight, and [`beve::Writer::appending`](crate::beve::Writer::appending)
+    /// is the same constructor on the other format.
+    ///
+    /// The bytes in front are not examined and need not be text, since what
+    /// comes back from [`Self::into_vec`] is bytes. They are checked, rather
+    /// than trusted, by [`Self::into_string`], which is what makes appending
+    /// onto the bytes of a `String` sound:
+    ///
+    /// ```
+    /// use structio::Standard;
+    /// use structio::json::{Write, Writer};
+    ///
+    /// let out = String::from("[1,2,");
+    /// let mut w = Writer::<Standard>::appending(out.into_bytes());
+    /// 3.write(&mut w);
+    /// let mut out = w.into_string();
+    /// out.push(']');
+    ///
+    /// assert_eq!(out, "[1,2,3]");
+    /// ```
     #[inline]
-    fn from_buf(buf: Vec<u8>) -> Self {
+    pub fn appending(buf: Vec<u8>) -> Self {
         Writer {
             limit: buf.capacity(),
             threshold: usize::MAX,
+            text_from: buf.len(),
             buf,
             sink: None,
             depth: 0,
@@ -171,6 +213,7 @@ impl<'a, O: Options> Writer<'a, O> {
         Writer {
             limit: buf.capacity().min(capacity),
             threshold: capacity,
+            text_from: 0,
             buf,
             sink: Some(Sink {
                 out,
@@ -196,15 +239,33 @@ impl<'a, O: Options> Writer<'a, O> {
     ///
     /// With a sink this returns only the undrained tail. Use
     /// [`Writer::finish`] instead.
+    ///
+    /// # Panics
+    ///
+    /// If the writer was built by [`Writer::appending`] over bytes that are
+    /// not valid UTF-8. Those are the only bytes in the buffer this writer did
+    /// not produce, so they are the only ones it has to check; a binary prefix
+    /// is a perfectly good thing to append JSON behind, but it cannot come
+    /// back out as a `String`. Take [`Writer::into_vec`] there instead.
     #[inline]
     pub fn into_string(self) -> String {
+        // The scan is over the prefix alone, not the document, and a writer
+        // that began at an empty buffer has no prefix to scan. Well-formed
+        // UTF-8 either side of the join makes the whole buffer well-formed,
+        // since the prefix ends on a character boundary by being whole.
+        assert!(
+            core::str::from_utf8(&self.buf[..self.text_from]).is_ok(),
+            "structio: `Writer::appending` was given bytes that are not UTF-8, so `into_string` \
+             cannot hand back a `String`; use `into_vec`"
+        );
         debug_assert!(core::str::from_utf8(&self.buf).is_ok());
         // SAFETY: every append path preserves UTF-8. `write_str` and `raw` copy
         // from a `&str`; numbers, escapes, and structural bytes are ASCII; and
         // `push`, the only byte-level entry point safe code can reach, asserts
         // its argument is ASCII. Draining is the one thing that removes a
         // prefix rather than adding a suffix, and it cuts only on a character
-        // boundary, so what is left is still whole characters.
+        // boundary, so what is left is still whole characters. Bytes the
+        // writer was handed rather than wrote have just been checked.
         unsafe { String::from_utf8_unchecked(self.buf) }
     }
 
@@ -217,7 +278,9 @@ impl<'a, O: Options> Writer<'a, O> {
     ///
     /// With a sink this counts only what has not been drained, matching
     /// [`Writer::as_bytes`]. A running total of the whole document is not
-    /// offered because a failed drain would make it a lie.
+    /// offered because a failed drain would make it a lie. With
+    /// [`Writer::appending`] it counts the bytes handed in as well, those
+    /// being in the buffer.
     #[inline]
     pub fn len(&self) -> usize {
         self.buf.len()

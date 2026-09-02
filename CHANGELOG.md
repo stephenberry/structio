@@ -4,6 +4,16 @@ Notable changes to structio. The format follows [Keep a Changelog](https://keepa
 
 Before 1.0 the API is not frozen: a minor bump may break it, and what broke is listed here.
 
+## [Unreleased]
+
+### Added
+
+- `json::append(&T, &mut Vec<u8>)` writes a document after what a buffer already holds, the counterpart of `beve::append`. `write_into` replaces a buffer's contents, so a value that has to sit behind a protocol header or behind the entries already in a listing needed a second buffer and a copy out of it. `json::Writer::appending` is the same thing with the writer in hand.
+
+### Changed
+
+- `json::Writer::into_string` checks the bytes handed to `Writer::appending`, and panics if they are not UTF-8. Every other byte in the buffer is UTF-8 by construction; those are the only ones the writer did not produce. Use `into_vec` to append JSON behind a binary prefix.
+
 ## [0.1.0] - 2026-09-01
 
 First release.
@@ -21,4 +31,5 @@ First release.
 - **Errors locate themselves.** `Error` carries a byte offset, `Error::display_with(input)` renders one with a line, column, and caret, and a `MissingKey` names the absent key.
 - `Parser::read_number_str` and `Writer::write_number_str`: a number's text, borrowed and written verbatim, for a fixed-point, decimal, bignum, or rational type. JSON only.
 
+[Unreleased]: https://github.com/stephenberry/structio/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/stephenberry/structio/releases/tag/v0.1.0

@@ -241,6 +241,53 @@ fn measuring_a_value_allocates_nothing() {
     assert_eq!(peak, 0, "measuring asked for {peak} bytes");
 }
 
+/// Assembling a listing by appending asks the allocator for nothing.
+///
+/// This is the whole reason `json::append` sits next to `write_into`. A value
+/// that has to land behind something -- a protocol header, or the entries
+/// already in a listing -- could previously only be written into a buffer of
+/// its own and copied out of it, which on a wide listing is an allocation per
+/// entry. Each entry here is kilobytes long, so that a buffer of its own
+/// would stand out well above the bound below even though it is freed before
+/// the next entry begins; the bound is loose only by the few dozen bytes the
+/// harness allocates on threads the lock does not reach.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn appending_a_listing_allocates_nothing() {
+    let _serial = serial();
+    const ENTRIES: usize = 64;
+    const ENTRY: usize = 4096;
+
+    let value = Blob {
+        text: "x".repeat(ENTRY),
+        tail: "y".repeat(ENTRY),
+    };
+    let mut listing = Vec::with_capacity(48 + 1 + ENTRIES * (2 * ENTRY + 64));
+    listing.extend_from_slice(&[0u8; 48]); // a header, already written
+    listing.push(b'[');
+    let ptr = listing.as_ptr();
+
+    let base = LIVE.load(Ordering::Relaxed);
+    PEAK.store(base, Ordering::Relaxed);
+    for _ in 0..ENTRIES {
+        structio::append(&value, &mut listing);
+        listing.push(b',');
+    }
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+
+    *listing.last_mut().unwrap() = b']';
+    assert!(peak < 1024, "appending asked for {peak} bytes");
+    // The one buffer throughout, and the header still in front of it.
+    assert!(std::ptr::eq(listing.as_ptr(), ptr));
+    assert_eq!(&listing[..48], &[0u8; 48]);
+    assert_eq!(
+        structio::from_slice::<Vec<Blob>>(&listing[48..])
+            .unwrap()
+            .len(),
+        ENTRIES
+    );
+}
+
 /// Reading one enormous array from a reader does not hold its encoded form.
 ///
 /// This is the whole reason `read_array_into` exists next to `from_reader`.

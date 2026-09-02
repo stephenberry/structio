@@ -310,11 +310,11 @@ pub use options::{
 pub use traits::{Elements, Keys, ReadWrite, Same, Variants};
 
 pub use json::{
-    Documents, Feed, Mode, from_reader, from_reader_with, from_slice, from_slice_with, from_str,
-    from_str_with, minify, minify_into, minify_into_with, minify_with, prettify, prettify_into,
-    prettify_into_with, prettify_with, read_into, read_into_with, to_string, to_string_with,
-    to_vec, to_vec_with, to_writer, to_writer_buffered, to_writer_buffered_with, to_writer_with,
-    write_into, write_into_with,
+    Documents, Feed, Mode, append, append_with, from_reader, from_reader_with, from_slice,
+    from_slice_with, from_str, from_str_with, minify, minify_into, minify_into_with, minify_with,
+    prettify, prettify_into, prettify_into_with, prettify_with, read_into, read_into_with,
+    to_string, to_string_with, to_vec, to_vec_with, to_writer, to_writer_buffered,
+    to_writer_buffered_with, to_writer_with, write_into, write_into_with,
 };
 
 // The BEVE entry points carry their format in the name at the root, where

@@ -456,6 +456,95 @@ fn write_into_reuses_the_buffer() {
 }
 
 #[test]
+fn append_writes_past_what_the_buffer_holds() {
+    // A body behind a fixed binary header: the prefix is untouched and the
+    // document begins where it ends.
+    let mut frame = vec![0xFFu8; 48];
+    let p = Person {
+        age: 3,
+        ..Default::default()
+    };
+    structio::append(&p, &mut frame);
+
+    assert_eq!(&frame[..48], &[0xFFu8; 48]);
+    assert_eq!(
+        from_str::<Person>(str::from_utf8(&frame[48..]).unwrap())
+            .unwrap()
+            .age,
+        3
+    );
+
+    // And a listing assembled entry by entry, which is the other shape of the
+    // same need: each value is appended behind the ones before it.
+    let mut listing = Vec::from(b"{");
+    for (i, key) in ["a", "b", "c"].iter().enumerate() {
+        listing.extend_from_slice(format!(r#""{key}":"#).as_bytes());
+        structio::append(
+            &Person {
+                age: i as u32,
+                ..Default::default()
+            },
+            &mut listing,
+        );
+        listing.push(b',');
+    }
+    *listing.last_mut().unwrap() = b'}';
+
+    let parsed: std::collections::BTreeMap<String, Person> =
+        structio::from_slice(&listing).unwrap();
+    assert_eq!(parsed["c"].age, 2);
+}
+
+#[test]
+fn append_keeps_the_buffers_allocation() {
+    let mut buf = Vec::with_capacity(1024);
+    buf.extend_from_slice(b"[");
+    let ptr = buf.as_ptr();
+    for _ in 0..10 {
+        structio::append(&Person::default(), &mut buf);
+        buf.push(b',');
+    }
+    *buf.last_mut().unwrap() = b']';
+
+    assert_eq!(structio::from_slice::<Vec<Person>>(&buf).unwrap().len(), 10);
+    // The allocation survived every call: no second buffer, no copy out of it.
+    assert!(std::ptr::eq(buf.as_ptr(), ptr));
+}
+
+#[test]
+fn appending_into_the_bytes_of_a_string() {
+    use structio::Standard;
+    use structio::json::{Write, Writer};
+
+    let out = String::from(r#"{"seen":["#);
+    let mut w = Writer::<Standard>::appending(out.into_bytes());
+    Person {
+        age: 9,
+        ..Default::default()
+    }
+    .write(&mut w);
+    let mut out = w.into_string();
+    out.push_str("]}");
+
+    assert!(out.starts_with(r#"{"seen":[{"#));
+    assert!(out.ends_with("]}"));
+    assert!(out.contains(r#""age":9"#));
+}
+
+#[test]
+#[should_panic(expected = "not UTF-8")]
+fn into_string_will_not_hand_back_a_binary_prefix() {
+    use structio::Standard;
+    use structio::json::{Write, Writer};
+
+    // `into_string` converts without revalidating what the writer itself
+    // wrote, so the bytes it did not write are the ones it has to check.
+    let mut w = Writer::<Standard>::appending(vec![0xFF, 0xFE]);
+    Person::default().write(&mut w);
+    let _ = w.into_string();
+}
+
+#[test]
 fn leading_whitespace_before_any_top_level_value() {
     // Containers skipped it themselves; scalars did not, so a document that
     // opened with a space or a newline failed at byte 0.
