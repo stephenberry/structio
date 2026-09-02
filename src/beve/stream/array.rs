@@ -5,9 +5,14 @@
 //! array has no smaller unit to be read in, which leaves
 //! [`from_reader`](crate::beve::from_reader) and its `read_to_end`. That is the
 //! case this module covers, and the one shape where it can be covered without a
-//! second decoder: a typed numeric array's payload is already the in-memory
-//! form of `[T]`, so it can go from the reader into the vector's own memory
-//! with nothing in between.
+//! second decoder: a block's payload is already the in-memory form of `[T]`, so
+//! it can go from the reader into the vector's own memory with nothing in
+//! between.
+//!
+//! Both kinds of block qualify. A typed numeric array is one, and so is a
+//! complex array, whose interleaved `(re, im)` components are the in-memory
+//! form of `[Complex<T>]` for the same reason. They differ only in the
+//! preamble that precedes the payload.
 
 use std::io;
 
@@ -34,14 +39,18 @@ const CHUNK: usize = 1 << 20;
 /// once; reading into a vector that already has the capacity avoids even
 /// that.
 ///
-/// Both typed array forms are accepted, [plain](crate::beve::to_vec) and
-/// [aligned](crate::beve::to_vec_aligned). The padding the aligned form carries
-/// exists so a reader can point at the payload rather than copy it; there is
-/// nothing to point at in a stream, so it is stepped over. A *generic* array is
-/// [`ExpectedArray`](ErrorCode::ExpectedArray) even where its elements are all
-/// numbers, holding a header apiece rather than a block, and
-/// [`from_slice`](crate::beve::from_slice) reads one into a `Vec<T>` where this
-/// will not.
+/// Every form whose payload is a block is accepted: a typed numeric array
+/// [plain](crate::beve::to_vec) or [aligned](crate::beve::to_vec_aligned), and
+/// a complex array. The padding the aligned form carries exists so a reader can
+/// point at the payload rather than copy it; there is nothing to point at in a
+/// stream, so it is stepped over.
+///
+/// A *generic* array is [`ExpectedArray`](ErrorCode::ExpectedArray) even where
+/// its elements are all numbers, holding a header apiece rather than a block,
+/// and [`from_slice`](crate::beve::from_slice) reads one into a `Vec<T>` where
+/// this will not. A boolean or string array is
+/// [`ElementTypeMismatch`](ErrorCode::ElementTypeMismatch): a typed array of
+/// something that is not a numeric block at all.
 ///
 /// `out` is cleared first and keeps its capacity, which is what the `_into`
 /// form is for: a pull loop reading one array after another allocates once
@@ -225,14 +234,46 @@ impl<R: io::Read> Source<R> {
 
     /// Consume the array's preamble and report how many elements follow.
     ///
-    /// The two forms are the ones
+    /// Three forms, all of them ones
     /// [`Reader::try_slice`](crate::beve::Reader::try_slice) borrows from, read
     /// here from a stream rather than a slice: a plain typed array is `HEADER |
-    /// SIZE | DATA`, and the aligned form is `HEADER | NUMERIC_HEADER | SIZE |
-    /// PADDING_LENGTH | PADDING | DATA`.
+    /// SIZE | DATA`, the aligned form is `HEADER | NUMERIC_HEADER | SIZE |
+    /// PADDING_LENGTH | PADDING | DATA`, and a complex array is `COMPLEX |
+    /// CLASS | SIZE | DATA`.
     fn array_head<T: NumericBytes>(&mut self) -> StreamResult<usize> {
         let start = self.pos;
         let h = self.byte()?;
+
+        // A complex array is an extension rather than a typed array, so it is
+        // read before the typed-array gate below. Its payload is still a
+        // block: interleaved `(re, im)` components at the class's width, which
+        // is the in-memory form of `[Complex<T>]`, so everything past this
+        // preamble is the same read.
+        if h == header::COMPLEX {
+            let at = self.pos;
+            let class = self.byte()?;
+            // The low three bits carry the *form*, where a number header
+            // carries its type. `COMPLEX_ONE` is a lone value with no count,
+            // so it is not an array to be read in; the other six values are
+            // undefined and a reader must refuse rather than guess, because
+            // the two defined forms differ by whether a size precedes the
+            // payload. The width lookup rules out the undefined classes in the
+            // same test, as it does for the aligned form below.
+            if header::ty(class) != header::COMPLEX_MANY
+                || header::byte_width(header::sub(class), header::count(class)).is_none()
+            {
+                return Err(self.fail(at, ErrorCode::InvalidHeader));
+            }
+            let n = self.count()?;
+            // `complex_element` is exactly what a `Complex<T>` declares, so
+            // the element check at the end of this function does the same work
+            // for this form as for the others.
+            if header::complex_element(class) != T::ELEMENT {
+                return Err(self.fail(start, ErrorCode::ElementTypeMismatch));
+            }
+            return Ok(n);
+        }
+
         if header::ty(h) != header::TY_TYPED_ARRAY {
             return Err(self.fail(start, ErrorCode::ExpectedArray));
         }
@@ -292,6 +333,17 @@ impl<R: io::Read> Source<R> {
         per: usize,
     ) -> StreamResult<()> {
         let width = Block::<T>::WIDTH;
+        // The stride the byte order applies to, which is the *component* and
+        // not the element: a complex element is two of them, and reversing all
+        // eight bytes of a `Complex<f32>` would transpose `re` and `im` as well
+        // as swapping each one's bytes. For every other numeric type the
+        // component is the element, so this is the same number `width` is.
+        //
+        // `T::ELEMENT` carries the class and width fields in the place
+        // `byte_width` reads them for both kinds of element, which is the
+        // whole reason `complex_element` puts them there.
+        let component =
+            header::byte_width(header::sub(T::ELEMENT), header::count(T::ELEMENT)).unwrap_or(width);
         while out.len() < n {
             let base = out.len();
             let end = n.min(base + per);
@@ -327,10 +379,11 @@ impl<R: io::Read> Source<R> {
             };
             self.exact(dst)?;
             // BEVE is little endian, and every bit pattern is a value, so the
-            // whole conversion on a big-endian host is reversing each element's
-            // bytes where they lie. This is what a borrow cannot do.
-            if cfg!(target_endian = "big") && width > 1 {
-                for e in dst.chunks_exact_mut(width) {
+            // whole conversion on a big-endian host is reversing each
+            // component's bytes where they lie. This is what a borrow cannot
+            // do.
+            if cfg!(target_endian = "big") && component > 1 {
+                for e in dst.chunks_exact_mut(component) {
                     e.reverse();
                 }
             }

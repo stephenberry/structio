@@ -15,7 +15,7 @@
 use std::io;
 
 use structio::beve::header;
-use structio::{ErrorCode, StreamError};
+use structio::{Complex, ErrorCode, StreamError};
 
 /// A reader that hands back one byte per call, so every internal `read_exact`
 /// has to loop. A real stream behind a decompressor is free to do this.
@@ -372,6 +372,180 @@ fn trailing_content_empties_the_destination_too() {
 
     let mut out: Vec<f64> = vec![9.0; 4];
     let err = structio::read_beve_array_into(&mut out, &doc[..]).unwrap_err();
+    assert_eq!(code(&err), ErrorCode::TrailingContent);
+    assert!(out.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Complex arrays
+// ---------------------------------------------------------------------------
+
+/// The complex array is a block like any other, and this call reads it.
+///
+/// It is an *extension* rather than a typed array, so its tag is a different
+/// byte and the preamble carries a class where a typed array carries its size
+/// directly. Everything past that is the same read: the payload is interleaved
+/// `(re, im)` components, which is the in-memory form of `[Complex<T>]`.
+///
+/// This is the property the call exists for, and a complex array is where it is
+/// worth the most: a buffer of IQ samples is the thing a consumer cannot afford
+/// to hold twice.
+#[test]
+fn a_complex_array_reads_as_a_block() {
+    macro_rules! check_complex {
+        ($($t:ty),* $(,)?) => {$({
+            for len in [0usize, 1, 2, 7, 64, 1000] {
+                // `im` differs from `re` so a stride that transposed the two
+                // would be visible, and stays in range for the unsigned types.
+                let values: Vec<Complex<$t>> = (0..len)
+                    .map(|i| Complex { re: i as $t, im: (i + 1) as $t })
+                    .collect();
+                for doc in [structio::to_beve(&values), structio::to_beve_aligned(&values)] {
+                    let whole: Vec<Complex<$t>> =
+                        structio::from_beve_reader_array(&doc[..]).unwrap();
+                    assert_eq!(whole, values, "Complex<{}> len {len}", stringify!($t));
+
+                    // Same bytes, arriving one at a time.
+                    let dribbled: Vec<Complex<$t>> =
+                        structio::from_beve_reader_array(Dribble(&doc)).unwrap();
+                    assert_eq!(
+                        dribbled, values,
+                        "Complex<{}> len {len} dribbled", stringify!($t)
+                    );
+
+                    // And the same as the reader that holds the document,
+                    // which is the agreement the rest of this file rests on.
+                    assert_eq!(
+                        structio::from_beve::<Vec<Complex<$t>>>(&doc).unwrap(),
+                        values,
+                        "Complex<{}> len {len} batch",
+                        stringify!($t)
+                    );
+                }
+            }
+        })*};
+    }
+
+    check_complex!(f32, f64, i8, i16, i32, i64, u8, u16, u32, u64);
+}
+
+/// A component's byte order is its own.
+///
+/// The conversion a big-endian host makes reverses each *component*, not each
+/// element: a `Complex<f32>` is eight bytes and reversing all eight would
+/// transpose `re` and `im` as well as swapping the bytes of each. Asserted
+/// through values that are not palindromes in either half, so a stride taken
+/// from the element rather than the component is visible in the result on the
+/// host where it would be wrong.
+#[test]
+fn each_component_keeps_its_own_byte_order() {
+    let values = vec![
+        Complex {
+            re: 1.0f64,
+            im: 2.0,
+        },
+        Complex {
+            re: f64::MIN,
+            im: f64::MAX,
+        },
+        Complex {
+            re: -0.0,
+            im: f64::EPSILON,
+        },
+        Complex {
+            re: f64::INFINITY,
+            im: f64::NEG_INFINITY,
+        },
+    ];
+    let doc = structio::to_beve(&values);
+
+    let streamed: Vec<Complex<f64>> = structio::from_beve_reader_array(&doc[..]).unwrap();
+    assert_eq!(streamed, values);
+    assert_eq!(
+        streamed,
+        structio::from_beve::<Vec<Complex<f64>>>(&doc).unwrap()
+    );
+}
+
+/// A complex array and a numeric array of its component type are different
+/// documents, and neither reads as the other.
+///
+/// This is what the synthetic element header buys: `complex_element` puts
+/// `TY_UNDEFINED` where a number header puts its type, so the two cannot
+/// collide and the element check refuses the pairing in both directions
+/// without anyone having to ask which form a header came from.
+#[test]
+fn a_complex_array_is_not_a_numeric_array_of_its_components() {
+    let complex = structio::to_beve(&vec![Complex {
+        re: 1.0f32,
+        im: 2.0,
+    }]);
+    let numeric = structio::to_beve(&vec![1.0f32, 2.0]);
+
+    let err = structio::from_beve_reader_array::<f32, _>(&complex[..]).unwrap_err();
+    assert_eq!(code(&err), ErrorCode::ElementTypeMismatch);
+
+    let err = structio::from_beve_reader_array::<Complex<f32>, _>(&numeric[..]).unwrap_err();
+    assert_eq!(code(&err), ErrorCode::ElementTypeMismatch);
+
+    // And a component width that does not match is refused the same way a
+    // numeric one is, rather than reinterpreting the payload.
+    let err = structio::from_beve_reader_array::<Complex<f64>, _>(&complex[..]).unwrap_err();
+    assert_eq!(code(&err), ErrorCode::ElementTypeMismatch);
+}
+
+/// The class byte's low three bits are a *form*, and only one of the two
+/// defined ones is an array.
+///
+/// `COMPLEX_ONE` is a lone value with no count before its payload, so reading
+/// it as an array would take the first components for a size. The other six
+/// values are undefined, and a reader must refuse rather than guess, because
+/// the two defined forms differ by exactly that size.
+#[test]
+fn only_the_run_form_of_a_complex_value_is_an_array() {
+    let lone = structio::to_beve(&Complex {
+        re: 1.0f64,
+        im: 2.0,
+    });
+    let err = structio::from_beve_reader_array::<Complex<f64>, _>(&lone[..]).unwrap_err();
+    assert_eq!(code(&err), ErrorCode::InvalidHeader);
+
+    // Every undefined form, and an undefined component width alongside them.
+    let mut doc = structio::to_beve(&vec![Complex {
+        re: 1.0f64,
+        im: 2.0,
+    }]);
+    for form in [2u8, 3, 4, 5, 6, 7] {
+        doc[1] = header::complex_class(header::CAT_FLOAT, 3, form);
+        let err = structio::from_beve_reader_array::<Complex<f64>, _>(&doc[..]).unwrap_err();
+        assert_eq!(code(&err), ErrorCode::InvalidHeader, "form {form}");
+    }
+    doc[1] = header::complex_class(header::CAT_OTHER, 3, header::COMPLEX_MANY);
+    let err = structio::from_beve_reader_array::<Complex<f64>, _>(&doc[..]).unwrap_err();
+    assert_eq!(code(&err), ErrorCode::InvalidHeader);
+}
+
+/// A truncated or over-long complex document fails where a numeric one does,
+/// and empties the destination on the way out.
+#[test]
+fn a_complex_array_is_bounded_like_a_numeric_one() {
+    let values: Vec<Complex<f64>> = (0..8)
+        .map(|i| Complex {
+            re: i as f64,
+            im: 0.0,
+        })
+        .collect();
+    let doc = structio::to_beve(&values);
+
+    let mut out: Vec<Complex<f64>> = vec![Complex { re: 9.0, im: 9.0 }; 4];
+    let err = structio::read_beve_array_into(&mut out, &doc[..doc.len() - 8]).unwrap_err();
+    assert_eq!(code(&err), ErrorCode::UnexpectedEnd);
+    assert!(out.is_empty());
+
+    let mut over = doc.clone();
+    over.extend_from_slice(&structio::to_beve(&7u8));
+    let mut out: Vec<Complex<f64>> = vec![Complex { re: 9.0, im: 9.0 }; 4];
+    let err = structio::read_beve_array_into(&mut out, &over[..]).unwrap_err();
     assert_eq!(code(&err), ErrorCode::TrailingContent);
     assert!(out.is_empty());
 }
