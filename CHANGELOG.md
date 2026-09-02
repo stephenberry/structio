@@ -4,6 +4,12 @@ Notable changes to structio. The format follows [Keep a Changelog](https://keepa
 
 Before 1.0 the API is not frozen: a minor bump may break it, and what broke is listed here.
 
+## [Unreleased]
+
+### Changed
+
+- `beve::Reader::read_seq` documents that element positions do not bound documents. A typed array's element headers, a complex array's, and a boolean run's are supplied by the reader rather than present in the input, so a span cut between two `position()` calls is not a value `Reader::new` can read. Use `Documents::array` to take elements as documents of their own.
+
 ## [0.2.0] - 2026-09-02
 
 ### Added

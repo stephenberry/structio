@@ -833,6 +833,39 @@ impl<'de, O: Options> Reader<'de, O> {
     /// either way, because a typed array's element header is installed before
     /// each call. `element` receives the zero-based position so container
     /// implementations can reuse storage they already hold.
+    ///
+    /// # Element positions do not bound documents
+    ///
+    /// Installed, not present: that header is supplied by this reader and is
+    /// not among the input's bytes, so a span cut between two
+    /// [`position`](Self::position)s is not a value [`Reader::new`] could
+    /// read. Out of a typed array it is headerless payload, and the first
+    /// payload byte is then taken for a header; out of a packed boolean run
+    /// it is empty, the cursor staying put until the run is done; out of a
+    /// [complex array](header::COMPLEX), whose elements are bare pairs, it is
+    /// headerless too. Only a generic array's elements are self-contained
+    /// values in the input.
+    ///
+    /// A caller that wants each element as a document of its own should
+    /// therefore not cut spans here.
+    /// [`Documents::array`](crate::beve::Documents::array) over the same bytes
+    /// hands out one element at a time with the header installed, takes a
+    /// different type per call, and accepts every array shape:
+    ///
+    /// ```
+    /// # use structio::beve::{Documents, to_vec};
+    /// let bytes = to_vec(&vec![1.5f64, 2.5]); // a typed array
+    /// let mut docs = Documents::array(&bytes[..]);
+    /// let mut first = 0f64;
+    /// docs.next_value_into(&mut first).unwrap()?;
+    /// assert_eq!(first, 1.5);
+    /// # Ok::<(), structio::StreamError>(())
+    /// ```
+    ///
+    /// Cutting spans regardless means checking the header type first and
+    /// taking only [`TY_GENERIC_ARRAY`](header::TY_GENERIC_ARRAY); a walk
+    /// alone cannot tell the shapes apart, because the closure signature and
+    /// [`position`](Self::position) are the same either way.
     pub fn read_seq<F>(&mut self, mut element: F) -> PResult<usize>
     where
         F: FnMut(&mut Self, usize) -> PResult<()>,
