@@ -164,7 +164,7 @@ The crate root carries the JSON entry points unqualified and the BEVE ones with 
 
 ## Performance in one paragraph
 
-Against Glaze on identical documents, reading is 50-112% and writing 66-155% depending on the type. Writing integers and booleans is faster than Glaze; strings and floats are below it. Output is byte-identical to Glaze's on every benchmark document, floats included. Full table, methodology, and an important caveat about how sensitive the benchmark is to code layout: [docs/performance.md](docs/performance.md).
+Against Glaze on identical documents, reading is 58-105% and writing 67-161% depending on the type. Writing integers and booleans is faster than Glaze; strings and floats are below it. Output is byte-identical to Glaze's on every benchmark document, floats included. Full table, methodology, and an important caveat about how sensitive the benchmark is to code layout: [docs/performance.md](docs/performance.md).
 
 No comparison against `serde_json` has been run, so please do not infer one.
 

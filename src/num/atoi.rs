@@ -38,45 +38,91 @@ pub(crate) const fn is_digit(c: u8) -> bool {
     c.wrapping_sub(b'0') < 10
 }
 
+/// The most digits that always fit a `u64`, since `10^19 - 1 < u64::MAX`.
+/// Stopping here is what lets the accumulation below carry no overflow check.
+const SAFE_DIGITS: usize = 19;
+
 /// Parse an unsigned decimal at `*i`, stopping at the first non-digit.
 ///
 /// Returns the value and leaves `*i` on the terminator. Rejects a leading zero
 /// followed by another digit, which JSON does not allow.
 ///
-/// Accumulation is unchecked. Nineteen decimal digits always fit a `u64`
-/// (`10^19 - 1 < u64::MAX`), so overflow is decided once, from the digit count,
-/// rather than with a branch per digit.
-#[inline]
+/// This is deliberately small enough to inline into a caller's loop, because
+/// the caller is usually reading an array and a call per element costs more
+/// than the digits do: it spills the parser's cursor to the stack and reloads
+/// it on every return. Everything a short number does not need lives in
+/// [`parse_u64_wide`], out of line, so that the size of the rare cases cannot
+/// price the common one out of being inlined.
+#[inline(always)]
 pub(crate) fn parse_u64(buf: &[u8], i: &mut usize) -> PResult<u64> {
     let n = buf.len();
-    let mut idx = *i;
+    let idx = *i;
 
     if idx >= n {
         return Err(ErrorCode::UnexpectedEnd);
     }
-    let first = buf[idx];
-    if !is_digit(first) {
-        // A well formed negative number is still a number; it just cannot fit
-        // an unsigned target, and saying so is more useful than "expected a
-        // number" when the input reads `-1`.
-        return Err(if first == b'-' {
-            ErrorCode::NumberOutOfRange
-        } else {
-            ErrorCode::ExpectedNumber
-        });
+    let first = buf[idx].wrapping_sub(b'0');
+    if first >= 10 {
+        return Err(not_a_number(buf[idx]));
     }
 
     // JSON forbids leading zeros: `0` alone is fine, `01` is not.
-    if first == b'0' {
-        idx += 1;
-        if idx < n && is_digit(buf[idx]) {
+    if first == 0 {
+        if idx + 1 < n && is_digit(buf[idx + 1]) {
             return Err(ErrorCode::InvalidNumber);
         }
-        *i = idx;
+        *i = idx + 1;
         return Ok(0);
     }
 
-    let start = idx;
+    // Up to nineteen digits, so no step can overflow and the loop carries no
+    // check but the one that finds the end of the number.
+    let stop = n.min(idx + SAFE_DIGITS);
+    let mut value = first as u64;
+    let mut k = idx + 1;
+    while k < stop {
+        let c = buf[k].wrapping_sub(b'0');
+        if c >= 10 {
+            *i = k;
+            return Ok(value);
+        }
+        value = value * 10 + c as u64;
+        k += 1;
+    }
+
+    // Either the number is wide enough that overflow is back in question, or
+    // the buffer ended before a terminator did. Neither is the common case.
+    parse_u64_wide(buf, i, idx)
+}
+
+/// The first byte where a number was expected is not a digit.
+///
+/// Out of line so that the error text does not count against the size of
+/// [`parse_u64`], which is chosen to be inlinable.
+#[cold]
+#[inline(never)]
+fn not_a_number(first: u8) -> ErrorCode {
+    // A well formed negative number is still a number; it just cannot fit an
+    // unsigned target, and saying so is more useful than "expected a number"
+    // when the input reads `-1`.
+    if first == b'-' {
+        ErrorCode::NumberOutOfRange
+    } else {
+        ErrorCode::ExpectedNumber
+    }
+}
+
+/// Numbers [`parse_u64`] hands off: nineteen digits or more, and numbers that
+/// run to the end of the buffer.
+///
+/// `start` is the first digit, which the caller has already established is one
+/// and is not a lone leading zero. Accumulation is unchecked and the overflow
+/// question is settled once at the end, from the digit count, rather than with
+/// a branch per digit.
+#[inline(never)]
+fn parse_u64_wide(buf: &[u8], i: &mut usize, start: usize) -> PResult<u64> {
+    let n = buf.len();
+    let mut idx = start;
     let mut value: u64 = 0;
 
     // Bulk: eight digits per iteration while a full word is readable and every
@@ -105,7 +151,7 @@ pub(crate) fn parse_u64(buf: &[u8], i: &mut usize) -> PResult<u64> {
 
     let len = idx - start;
     *i = idx;
-    if len > 19 {
+    if len > SAFE_DIGITS {
         return recheck_wide(buf, start, idx);
     }
     Ok(value)
@@ -148,7 +194,12 @@ pub(crate) fn reject_float_tail(buf: &[u8], i: usize) -> PResult<()> {
 }
 
 /// Parse a signed integer into `i64`, then let the caller narrow.
-#[inline]
+///
+/// A sign test and two range compares around [`parse_u64`], and inlined for
+/// the same reason: this is what an array of signed integers calls per
+/// element, and left out of line it puts the call back that `parse_u64` was
+/// shaped to remove.
+#[inline(always)]
 pub(crate) fn parse_i64(buf: &[u8], i: &mut usize) -> PResult<i64> {
     let negative = *i < buf.len() && buf[*i] == b'-';
     if negative {

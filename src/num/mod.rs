@@ -92,6 +92,92 @@ mod tests {
         );
     }
 
+    /// Every terminator a JSON number can meet, plus a byte whose high bit is
+    /// set. `0xB5` is the one that matters: masked to seven bits it spells
+    /// `'5'`, so a digit test that looked only at the low seven would read it
+    /// as part of the number.
+    const TERMINATORS: [&[u8]; 10] = [
+        b"", b",", b"}", b"]", b" ", b"\n", b"\"", b":", b"\xB5", b"\xFF",
+    ];
+
+    /// The parser folds whole eight-digit words and then walks what is left
+    /// over one byte at a time, so its cases are digit counts either side of a
+    /// word boundary, each terminator that can end the run, and whether the
+    /// buffer has a whole word left to load at all.
+    #[test]
+    fn integers_of_every_length_against_every_terminator() {
+        for len in 1..=20usize {
+            // The largest and smallest values of this width, and one in
+            // between whose digits are all distinct so a misplaced lane shows
+            // up as a wrong answer rather than a coincidence.
+            let mut cases = vec![
+                "1".to_owned() + &"0".repeat(len - 1),
+                "9".repeat(len),
+                (1..=len)
+                    .map(|k| char::from(b'0' + (k % 10) as u8))
+                    .collect(),
+            ];
+            cases.retain(|s| !s.starts_with('0'));
+
+            for text in cases {
+                let expected: Option<u64> = text.parse().ok();
+                for term in TERMINATORS {
+                    // Once with the terminator alone, so the number sits at
+                    // the end of the buffer and no whole word is loadable, and
+                    // once with eight bytes of slack behind it, so the
+                    // word-at-a-time path is reachable.
+                    for pad in [0usize, 8] {
+                        let mut buf = text.clone().into_bytes();
+                        buf.extend_from_slice(term);
+                        buf.extend(std::iter::repeat_n(b' ', pad));
+
+                        let mut i = 0;
+                        let got = parse_u64(&buf, &mut i);
+                        match expected {
+                            Some(v) => {
+                                assert_eq!(got.ok(), Some(v), "{text:?} + {term:?} + {pad} spaces");
+                                assert_eq!(i, text.len(), "stopped in the wrong place");
+                            }
+                            None => assert!(got.is_err(), "{text:?} is past u64::MAX"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The same parser against the standard library's, over random values of
+    /// every width, each followed by a terminator so the scan has to find the
+    /// end rather than run out of buffer.
+    #[test]
+    fn integers_agree_with_the_standard_library() {
+        let mut next = xorshift(0x5EED_1234_ABCD_0001);
+        for _ in 0..rounds(200_000) {
+            let raw = next();
+            // Draw a width as well as a value, so short numbers -- the ones
+            // a document is actually full of -- are as well covered as the
+            // long ones that reach the overflow check.
+            let width = 1 + (next() % 20) as u32;
+            let v = raw % 10u64.checked_pow(width).unwrap_or(u64::MAX).max(1);
+            let text = v.to_string();
+
+            let mut buf = text.clone().into_bytes();
+            buf.extend_from_slice(b",\"rest\":0");
+
+            let mut i = 0;
+            assert_eq!(parse_u64(&buf, &mut i).unwrap(), v, "parsing {text:?}");
+            assert_eq!(i, text.len());
+
+            // And the signed path, which narrows the same magnitude.
+            if v <= i64::MAX as u64 {
+                let neg = format!("-{text},");
+                let mut i = 0;
+                assert_eq!(parse_i64(neg.as_bytes(), &mut i).unwrap(), -(v as i64));
+                assert_eq!(i, neg.len() - 1);
+            }
+        }
+    }
+
     #[test]
     #[allow(clippy::approx_constant)] // 3.14 here is a literal to format, not pi
     fn float_format_matches_glaze() {

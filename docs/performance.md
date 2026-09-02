@@ -10,23 +10,23 @@ BEVE has no comparable published baseline to sit beside, and its cost is dominat
 
 ## Results
 
-Apple M-series, Rust 1.98 `-C lto=fat -C codegen-units=1`, Clang `-O3 -march=native`, throughput in MB/s of the document, best of two runs on an otherwise idle machine.
+Apple M-series, Rust 1.98 `-C lto=fat -C codegen-units=1`, Clang `-O3 -march=native`, throughput in MB/s of the document, best of five runs on an otherwise idle machine, with the binary built before any run is timed so that no compile competes with one.
 
 | document | bytes | read | Glaze | | write | Glaze | |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| mixed | 248606 | 906 | 1288 | 70% | 1567 | 1816 | 86% |
-| strings | 127921 | 1762 | 1576 | **112%** | 1974 | 2799 | 71% |
-| uints | 30085 | 803 | 1603 | 50% | 1737 | 1345 | **129%** |
-| ints | 31679 | 724 | 1356 | 53% | 1822 | 1177 | **155%** |
-| doubles | 67154 | 656 | 1155 | 57% | 1398 | 1966 | 71% |
-| exact decimals | 29251 | 553 | 627 | 88% | 580 | 880 | 66% |
-| bools | 25675 | 1439 | 1690 | 85% | 4870 | 3831 | **127%** |
+| mixed | 248606 | 1000 | 1277 | 78% | 1526 | 1701 | 90% |
+| strings | 127921 | 1649 | 1565 | **105%** | 2346 | 2574 | 91% |
+| uints | 30085 | 1241 | 1547 | 80% | 1728 | 1323 | **131%** |
+| ints | 31679 | 1133 | 1317 | 86% | 1780 | 1135 | **157%** |
+| doubles | 67154 | 647 | 1122 | 58% | 1396 | 1954 | 71% |
+| exact decimals | 29251 | 582 | 611 | 95% | 569 | 855 | 67% |
+| bools | 25675 | 1402 | 1660 | 84% | 5615 | 3479 | **161%** |
 
 `mixed` is the representative case: the standard Glaze/JSONifier benchmark structure, 26 fields of nested structs each holding vectors of strings, unsigned ints, doubles, signed ints, and bools. The single-type documents isolate one converter each and are dominated by that converter, which is what makes them useful for finding weaknesses and misleading as a summary.
 
 ## Where it stands
 
-Reading is 50-112% of Glaze. Writing integers and bools is well above Glaze, strings and floats below.
+Reading is 58-105% of Glaze. Writing integers and bools is well above Glaze, strings and floats below.
 
 Float writing used to be the one real weakness, at 26-39%. `src/num/zmij.rs` replaced Ryu with a port of [zmij](https://github.com/vitaut/zmij), the algorithm Glaze itself uses, which took it to 66-71%:
 
@@ -41,6 +41,34 @@ Measured per value, the whole write went from 25.7 ns for an arbitrary double an
 One difference remains between this port and Glaze's copy: Glaze splits digits with SSE/NEON intrinsics and assembles the output through a table of precomputed field positions, where this takes zmij's portable scalar path for both, because the crate carries no architecture-specific code. Whether that accounts for the remaining gap has not been measured.
 
 Output is byte-identical to Glaze's on the benchmark documents, including float formatting, which the benchmark itself checks.
+
+### The integer read gap was a call, not the digits
+
+The obvious reading of the `uints` row used to be that the conversion was slow, since `atoi.hpp` unrolls a per-digit chain where `src/num/atoi.rs` folds whole eight-digit words and then loops over the tail, and the benchmark's values are one to seven digits each, so the word path never fires. Two rewrites of the conversion were tried on that theory. Both were slower than the loop they replaced, measured on a 200,000-number run: a SWAR mask locating the terminator went from 5.16 to 5.74 ns per value, and Glaze's own shape, nineteen unrolled digit tests with the bounds settled once up front, went to 14.19. Neither moved the document benchmark at all.
+
+What the disassembly showed instead is that the element loop was making a **call per element**. `<u64 as Read>::read` was left out of line, so every integer in the document cost an argument setup, a call, and the parser's cursor spilled to the stack and reloaded on return:
+
+```
+4e4:  add  x1, sp, #0x8      ; &mut Parser, from a stack slot
+4e8:  bl   <u64 as Read>::read
+4f4:  ldp  x1, x9, [sp, #0x10] ; reload data and idx afterwards
+```
+
+Glaze's array read has no call in it at all; its only ones are `operator new`, `operator delete` and unwinding. `#[inline]` is a hint, and LLVM was declining it because the transitive body, both digit loops plus the overflow recheck, priced it out.
+
+The fix is to make the common case small enough to be worth inlining rather than to ask harder. `parse_u64` now handles one to eighteen digits ending inside the buffer, which is a loop of about a dozen instructions carrying no overflow check, and hands everything else to `parse_u64_wide` out of line. That is enough for the whole chain to inline on its own. `Parser::read_u64`, `read_i64` and the integer `Read::read` are `#[inline(always)]` rather than `#[inline]`, because leaving them as hints makes the array loop's throughput depend on whether anything downstream has recently grown.
+
+The second difference the disassembly showed was whitespace. A four-way `matches!` does not stay four comparisons: it becomes a shift and a mask against a 64-bit set, plus a range guard, because a byte of 64 or more would shift out of the word. Glaze indexes a 256-byte table and needs no guard. Four instructions per token boundary became one.
+
+| read, MB/s | before | inlined | + ws table | Glaze |
+|---|---:|---:|---:|---:|
+| uints | 897 | 1101 | **1241** | 1547 |
+| ints | 793 | 933 | **1133** | 1317 |
+| mixed | 900 | 964 | **1000** | 1277 |
+| strings | 1528 | 1547 | **1649** | 1565 |
+| exact decimals | 548 | 531 | **582** | 611 |
+
+The lesson worth keeping is that the conversion was never the cost. Stubbing it out entirely, before any of this, took `uints` only from 900 to 1391, because the call stayed. Look at what the compiler emitted before rewriting what the source says.
 
 ## Prettifying
 
