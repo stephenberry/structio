@@ -116,7 +116,7 @@ for sample in docs.iter::<Sample>() {
 
 Typed arrays stream too, which is the part BEVE makes interesting: a file that is one enormous `Vec<f64>` comes back as `f64`s, because the splitter supplies the header the array implied for each element. See [streaming.md](streaming.md#beve).
 
-One whole value is the floor, though, and a document that *is* one enormous numeric array has no smaller unit to be handed out in. `read_beve_array_into` is that case:
+One whole value is the floor, though, and a document that *is* one enormous numeric or complex array has no smaller unit to be handed out in. `read_beve_array_into` is that case:
 
 ```rust
 let file = std::io::BufReader::new(std::fs::File::open("samples.beve")?);
@@ -124,7 +124,7 @@ let mut samples: Vec<f64> = Vec::new();
 structio::read_beve_array_into(&mut samples, file)?;
 ```
 
-The payload goes from the reader into the vector's own memory, so the vector is the only thing held rather than the vector plus the document, and the block copy `Documents::array` gives up is kept. The price is that it is exact where the rest of the crate is lenient: the stored element type has to be `T`'s, and a stored `f32` read as `f64` is `ElementTypeMismatch` rather than a conversion. That case is what `Documents::array` is for, converting an element at a time under the same memory bound. A count read off the wire is never reserved on its word, so there is no size limit to set here as there is on `Documents`.
+The payload goes from the reader into the vector's own memory, so the vector is the only thing held rather than the vector plus the document, and the block copy `Documents::array` gives up is kept. A complex array reads the same way, into a `Vec<Complex<T>>`. The price is that it is exact where the rest of the crate is lenient: the stored element type has to be `T`'s, and a stored `f32` read as `f64` is `ElementTypeMismatch` rather than a conversion. That case is what `Documents::array` is for, converting an element at a time under the same memory bound. A count read off the wire is never reserved on its word, so there is no size limit to set here as there is on `Documents`.
 
 ## Length-prefixed frames
 
@@ -319,7 +319,7 @@ Three things follow from all four hooks being reachable.
 | `beve_size(&T) -> usize` | The length `to_beve` would produce, without producing it. |
 | `beve_size_aligned_after(&T, usize) -> usize` | The length `append_beve_aligned` would add behind a prefix of that length. |
 | `from_beve_reader::<T>(impl io::Read) -> StreamResult<T>` | Read a whole document from a reader, then parse. |
-| `read_beve_array_into(&mut Vec<T>, impl io::Read)` | Read a document that is one numeric array, holding only the vector. |
+| `read_beve_array_into(&mut Vec<T>, impl io::Read)` | Read a document that is one numeric or complex array, holding only the vector. |
 | `from_beve_reader_array::<T>(impl io::Read)` | The same into a fresh vector. |
 | `beve_slice_ref::<T>(&[u8]) -> Option<&[T]>` | Borrow a document that is one numeric array, or decline. |
 | `beve::Reader::try_slice::<T>()` | The same at the cursor, for a block inside a larger document. |

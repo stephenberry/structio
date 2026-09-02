@@ -108,9 +108,11 @@ let mut samples: Vec<f64> = Vec::new();
 structio::read_beve_array_into(&mut samples, file)?;
 ```
 
-The payload goes from the reader into the vector's own memory, so the vector is the only thing held rather than the vector plus the encoded document, and the copy stays one block per megabyte instead of one per element. Reading into a vector that already has the capacity holds only that, growing one being a `Vec` growing like any other. Both array forms are accepted, plain and aligned. Reading into a vector you keep is what makes a loop cost one array rather than two; `from_beve_reader_array` is the same read into a fresh one.
+The payload goes from the reader into the vector's own memory, so the vector is the only thing held rather than the vector plus the encoded document, and the copy stays one block per megabyte instead of one per element. Reading into a vector that already has the capacity holds only that, growing one being a `Vec` growing like any other. Reading into a vector you keep is what makes a loop cost one array rather than two; `from_beve_reader_array` is the same read into a fresh one.
 
-It is exact where the rest of the crate is lenient. The stored element type has to be `T`'s, and a stored `f32` read as `f64` is `ElementTypeMismatch` rather than the widening `from_beve` performs happily. Converting is per-element work, which is the thing this call exists to skip, so it says so instead of quietly becoming `Documents::array`. Big-endian hosts are not excluded: elements are swapped in place after the copy, which a borrow cannot do and this can.
+Every form whose payload is a block is accepted: a typed numeric array plain or aligned, and a **complex** array, whose interleaved `(re, im)` components are the in-memory form of `[Complex<T>]` for the same reason a typed array's payload is the in-memory form of `[T]`. A buffer of IQ samples is where this is worth the most, being the thing a consumer can least afford to hold twice.
+
+It is exact where the rest of the crate is lenient. The stored element type has to be `T`'s, and a stored `f32` read as `f64` is `ElementTypeMismatch` rather than the widening `from_beve` performs happily. Converting is per-element work, which is the thing this call exists to skip, so it says so instead of quietly becoming `Documents::array`. Big-endian hosts are not excluded: components are swapped in place after the copy, which a borrow cannot do and this can. A component and not an element, because a complex element is two of them and each keeps its own byte order.
 
 There is no `max_value` here and none is needed. A count read off the wire is never reserved on its word, so a length that is never delivered costs about what did arrive and then fails with `UnexpectedEnd`.
 

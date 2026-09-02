@@ -346,6 +346,58 @@ fn reading_an_array_from_a_reader_does_not_hold_the_encoding() {
     );
 }
 
+/// The same, for a complex array — the shape that most needs it.
+///
+/// A complex array is an extension rather than a typed array, so it reaches
+/// this call through a different preamble; what follows the preamble is the
+/// same block, interleaved `(re, im)` at the component width. A buffer of IQ
+/// samples is the case a consumer can least afford to hold twice, so the
+/// property is asserted here rather than inferred from the numeric test above.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn reading_a_complex_array_from_a_reader_does_not_hold_the_encoding() {
+    const ELEMENTS: usize = 256 * 1024;
+    const PAYLOAD: usize = ELEMENTS * size_of::<structio::Complex<f64>>();
+
+    let file = structio::to_beve(
+        &(0..ELEMENTS)
+            .map(|i| structio::Complex {
+                re: i as f64,
+                im: -(i as f64),
+            })
+            .collect::<Vec<_>>(),
+    );
+    assert!(file.len() > PAYLOAD);
+
+    let base = measuring();
+    let slurped: Vec<structio::Complex<f64>> = beve::from_reader(&file[..]).unwrap();
+    let slurped_peak = peak_over(base);
+    drop(slurped);
+
+    let base = measuring();
+    let mut streamed: Vec<structio::Complex<f64>> = Vec::new();
+    beve::read_array_into(&mut streamed, &file[..]).unwrap();
+    let streamed_peak = peak_over(base);
+
+    assert_eq!(streamed.len(), ELEMENTS);
+    assert_eq!(
+        streamed[ELEMENTS - 1],
+        structio::Complex {
+            re: (ELEMENTS - 1) as f64,
+            im: -((ELEMENTS - 1) as f64),
+        }
+    );
+    assert_eq!(streamed.capacity(), ELEMENTS);
+    assert!(
+        streamed_peak < PAYLOAD + 256 * 1024,
+        "streaming a {PAYLOAD}-byte complex array peaked at {streamed_peak} bytes"
+    );
+    assert!(
+        slurped_peak > streamed_peak + PAYLOAD / 2,
+        "slurping peaked at {slurped_peak} bytes against {streamed_peak}"
+    );
+}
+
 /// A count is not a licence to allocate.
 ///
 /// The bytes here claim four billion `f64`, which is 32 GiB, and deliver a

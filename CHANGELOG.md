@@ -4,6 +4,16 @@ Notable changes to structio. The format follows [Keep a Changelog](https://keepa
 
 Before 1.0 the API is not frozen: a minor bump may break it, and what broke is listed here.
 
+## [Unreleased]
+
+### Fixed
+
+- `read_array_into` and `from_reader_array` read a **complex array**. They read the typed-array tag and stopped at the extension's, so the one shape that most needs a streaming block read — a buffer of IQ samples, which a consumer can least afford to hold twice — had to go through `from_reader` and hold the encoded document alongside the vector. The payload was always a block: interleaved `(re, im)` components are the in-memory form of `[Complex<T>]` for the same reason a typed array's payload is the in-memory form of `[T]`. Only the preamble differed.
+
+  The aligned complex form is byte-identical to the plain one, so both arrive by the same path. `COMPLEX_ONE` is refused as `InvalidHeader`, being a lone value with no count rather than an array, as are the six undefined forms of the class byte.
+
+- The big-endian conversion in the same read reverses each **component** rather than each element. It could not have fired before, no complex array having reached it, but a `Complex<f32>` is eight bytes and reversing all eight would have transposed `re` and `im` as well as swapping the bytes of each. For every other numeric type the component is the element, so one stride serves both.
+
 ## [0.2.1] - 2026-09-02
 
 ### Changed
