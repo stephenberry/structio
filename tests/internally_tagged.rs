@@ -472,13 +472,34 @@ fn whitespace_around_the_tag_does_not_change_the_reading() {
 
 #[test]
 fn a_document_that_ends_mid_value_is_not_a_document_that_held_the_wrong_thing() {
+    // A truncated document must never be reported as a *schema* error. Saying
+    // `ExpectedTag` for `{"ki` would tell the reader their tag is in the wrong
+    // place when the real answer is that the bytes ran out.
     for doc in [
+        r#"{"ki"#,
         r#"{"kind""#,
+        r#"{"kind":"#,
+        r#"{"kind": "#,
         r#"{"kind":"Circ"#,
         r#"{"kind":"Circle","radius""#,
     ] {
         let err = from_str::<Shape>(doc).unwrap_err();
-        assert_ne!(err.code, ErrorCode::ExpectedTag, "{doc}");
+        assert_eq!(err.code, ErrorCode::UnexpectedEnd, "{doc}");
+    }
+}
+
+#[test]
+fn the_two_formats_agree_on_a_truncated_document() {
+    // The one place the formats could drift: BEVE gets this for free from its
+    // length prefixes, JSON has to decide for itself.
+    let whole = to_beve(&Shape::Circle(Circle { radius: 1.5 }));
+    for cut in 1..whole.len() {
+        assert_eq!(
+            from_beve::<Shape>(&whole[..cut]).unwrap_err().code,
+            ErrorCode::UnexpectedEnd,
+            "truncated to {cut} of {}",
+            whole.len()
+        );
     }
 }
 

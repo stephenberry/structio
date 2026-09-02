@@ -6,7 +6,7 @@ That is the one design decision everything else on this page follows from. BEVE 
 
 ## Two wire forms, and no third
 
-Two forms for a variant declared with `unit_enum!` or `tagged_enum!`, which is what the rest of this page is about until [Internal tagging](#internal-tagging). That is a separate declaration with a wire form of its own, where the name goes inside the payload's object rather than wrapping it.
+These are the two, and a variant declared with `unit_enum!` or `tagged_enum!` takes one of them and nothing else. [Internal tagging](#internal-tagging) is a separate declaration with a wire form of its own, and the rest of this page is about these two until then.
 
 | The variant | Is written as | Example |
 |---|---|---|
@@ -237,6 +237,18 @@ from_str::<Shape>(r#"{"radius":1,"kind":"Circle"}"#);   // ExpectedTag, at "radi
 An object, and nothing else. The variant's members share one object with the tag, so a payload with no members of its own has nowhere to go: `Sides(u32)` is a compile error naming `WriteObject`, not a runtime surprise. Declare such a payload as a struct, or use `tagged_enum!`, which takes any payload because it gives it an object of its own.
 
 A variant carrying nothing is written as the tag alone. Members beside it are unknown members and meet the reader's policy exactly as a struct's would be: refused under `Standard`, stepped over under `SkipUnknown`.
+
+### Choose a tag no payload uses
+
+The tag shares one object with the payload's members, so a tag whose name is also a payload field writes that name twice:
+
+```json
+{"kind":"Config","kind":"debug","level":3}
+```
+
+structio reads this back correctly, because it takes the first member as the tag and hands the rest to the payload. **Nothing else will.** A last-wins parser — `JSON.parse`, and Glaze — sees `kind` as `"debug"` and the variant is gone. Under `RequireKeys` the collision is unsatisfiable from structio's side too: the tag was consumed before the payload was reached, so the payload's own `kind` can never be filled.
+
+This is not currently a compile error. The payload's type is deliberately absent from the declaration, so the macro has no name to check its keys against. Pick a tag that no variant's payload declares — `kind`, `type` and `op` are conventional precisely because they are rarely field names.
 
 Everything else on this page carries over. Renaming, case rules (which apply to the variant names, never to the tag key, that being a document key rather than a variant), generics, borrowed payloads, reading into an existing value, and the `json_`/`beve_` single-format variants all work as they do above. And because the result is an ordinary object, the rest of the crate needs to know even less about it than it does about an external tag: a pointer reaches `/kind` and `/radius` in the same object, with no enum-shaped step in the path.
 

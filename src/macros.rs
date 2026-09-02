@@ -1655,6 +1655,13 @@ macro_rules! beve_tagged_enum {
 /// of a struct does: refused under [`Standard`](crate::Standard), stepped over
 /// under [`SkipUnknown`](crate::SkipUnknown).
 ///
+/// **Choose a tag no payload declares as a field.** The two share one object,
+/// so a collision writes the name twice: `{"kind":"Config","kind":"debug"}`.
+/// This crate reads that back, taking the first member as the tag; a last-wins
+/// parser does not, and loses the variant. It cannot be a compile error here,
+/// the payload's type being deliberately absent from the declaration, so there
+/// is no key list for the macro to check against.
+///
 /// # Syntax
 ///
 /// The tag clause goes after the type, and a
@@ -2113,8 +2120,10 @@ macro_rules! __json_internal_enum_impls {
                         $crate::__json_key!([$case] $($name)? [$variant]),
                         // The tag key is a literal and is never case
                         // converted: it names a member of the document, not a
-                        // variant of the enum.
-                        $crate::__json_member!([_] $tag [__structio_tag]),
+                        // variant of the enum. A literal key's prefix comes
+                        // from `concat!`, which is what `__json_member!` exists
+                        // to stand in for where the key is *computed*.
+                        ::core::concat!("\"", $tag, "\":"),
                         $variant $(($($payload)*))?
                     );
                 )*
@@ -2139,8 +2148,11 @@ macro_rules! __json_read_internal {
     // beside it are unknown ones and meet the policy that governs those.
     ($self:ident, $p:ident, $open:ident, $name:expr, $variant:ident) => {
         if $p.match_key($name) {
+            // Assigned after the object is consumed, not before, so a read
+            // that fails on a member beside the tag leaves the destination
+            // holding what it held.
+            $p.finish_internally_tagged()?;
             *$self = Self::$variant;
-            $p.finish_tagged_object()?;
             ::core::result::Result::Ok(true)
         } else {
             ::core::result::Result::Ok(false)
@@ -2149,10 +2161,8 @@ macro_rules! __json_read_internal {
     // Carries a value, whose members share the object with the tag.
     ($self:ident, $p:ident, $open:ident, $name:expr, $variant:ident ($($payload:tt)*)) => {
         if $p.match_key($name) {
-            // Read into what is already there when it is already this variant,
-            // so a payload's buffers survive the read the way a struct field's
-            // do. Anything else is replaced, which is what changing variants
-            // means.
+            // Reading into what is already there, for
+            // `__json_read_payload!`'s reason.
             match $self {
                 Self::$variant(v) => {
                     $p.read_object_rest(v, $open)?;
@@ -2243,8 +2253,9 @@ macro_rules! __beve_internal_enum_impls {
 macro_rules! __beve_read_internal {
     ($self:ident, $key:ident, $r:ident, $remaining:ident, $open:ident, $name:expr, $variant:ident) => {
         if $key == $name.as_bytes() {
+            // Assigned after the object is consumed, for the JSON arm's reason.
+            $r.finish_internally_tagged($remaining)?;
             *$self = Self::$variant;
-            $r.finish_tagged_object($remaining)?;
             ::core::result::Result::Ok(true)
         } else {
             ::core::result::Result::Ok(false)
@@ -2282,7 +2293,10 @@ macro_rules! __beve_read_internal {
 macro_rules! __write_internal_variant {
     ($self:ident, $w:ident, $name:expr, $tag:expr, $variant:ident) => {
         if let Self::$variant = $self {
-            $w.write_internally_tagged_unit($tag, $name);
+            // An object of one member whose value is the name, which is
+            // exactly what `write_tagged` writes for an externally tagged
+            // payload. Same bytes, so there is no second writer for it.
+            $w.write_tagged($tag, $name);
             return;
         }
     };

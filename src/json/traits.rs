@@ -290,9 +290,9 @@ pub trait ReadInternallyTagged<'de>: Variants + Sized {
     /// value (inside its opening quote).
     ///
     /// The implementation consumes the name, then the rest of the enclosing
-    /// object including its closing brace: a variant carrying a value reads
-    /// the remaining members into it, and one carrying nothing accepts an
-    /// object that holds only the tag.
+    /// object including its closing brace, through
+    /// [`Parser::read_object_rest`] for a variant carrying a value and
+    /// [`Parser::finish_internally_tagged`] for one carrying nothing.
     ///
     /// Returns `false` if the name did not match, leaving the cursor
     /// untouched, which the caller reports as

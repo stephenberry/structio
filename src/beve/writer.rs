@@ -906,20 +906,6 @@ impl<'a, O: Options> Writer<'a, O> {
         }
     }
 
-    /// Write an internally tagged variant that carries nothing: an object
-    /// holding the tag and no more.
-    ///
-    /// Unlike [`Self::write_tagged`]'s bare-name form there is no shorter
-    /// spelling to fall back on: an internally tagged value is an object
-    /// whether or not the variant has anything in it.
-    #[inline]
-    pub fn write_internally_tagged_unit(&mut self, key: &[u8], name: &str) {
-        self.push(header::OBJECT);
-        self.size(1);
-        self.raw(key);
-        name.write(self);
-    }
-
     /// Write a struct as a BEVE array.
     ///
     /// The positional counterpart of [`Self::write_object`]. The element count

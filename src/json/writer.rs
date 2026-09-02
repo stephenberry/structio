@@ -770,22 +770,6 @@ impl<'a, O: Options> Writer<'a, O> {
         self.close(b'}');
     }
 
-    /// Write an internally tagged variant that carries nothing: `{"tag":"Name"}`.
-    ///
-    /// The object holds the tag and no more, which is what
-    /// [`Parser::read_internally_tagged`](crate::json::Parser::read_internally_tagged)
-    /// reads back. Unlike [`Self::write_tagged`]'s bare-name form there is no
-    /// shorter spelling to fall back on: an internally tagged value is an
-    /// object whether or not the variant has anything in it.
-    #[inline]
-    pub fn write_internally_tagged_unit(&mut self, prefix: &str, name: &str) {
-        self.open(b'{');
-        self.key(prefix);
-        self.write_str(name);
-        self.push(b',');
-        self.close(b'}');
-    }
-
     /// Write a struct as a JSON array.
     ///
     /// The bracket counterpart of [`Self::write_object`], down to the trailing

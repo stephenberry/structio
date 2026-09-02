@@ -18,7 +18,7 @@ use crate::num::atof::{parse_float, scan_number};
 use crate::num::atoi::{parse_i64, parse_u64, reject_float_tail};
 use crate::options::{Options, Standard};
 use crate::swar::{escape_mask, find_byte, first_match, load_u64, needs_escape};
-use crate::traits::{Fields, Keys};
+use crate::traits::{Fields, Keys, Variants};
 
 /// Nesting limit, so a hostile document cannot exhaust the stack.
 pub const MAX_DEPTH: u32 = 256;
@@ -278,8 +278,19 @@ impl<'de, O: Options> Parser<'de, O> {
         }
     }
 
+    /// Leave a container [`enter`](Self::enter) counted.
+    ///
+    /// The two are balanced by the caller, and the public
+    /// `read_object_rest` / `finish_internally_tagged` pair takes its `enter`
+    /// from whoever opened the object. A hand-written impl that calls one of
+    /// those without having entered would wrap the depth and silently disable
+    /// the nesting limit for the rest of the parse, so a debug build says so.
     #[inline(always)]
     pub(crate) fn leave(&mut self) {
+        debug_assert!(
+            self.depth > 0,
+            "structio: `leave` without a matching `enter`, which would disable the nesting limit"
+        );
         self.depth -= 1;
     }
 
@@ -324,17 +335,12 @@ impl<'de, O: Options> Parser<'de, O> {
         self.enter()?;
         self.skip_ws();
 
-        // One bit per field filled, compared once the object ends against the
-        // fields that had to be there. Never written, and so never read, unless
-        // the policy or the type asks for one.
-        let mut seen = 0u64;
-
         if self.try_byte(b'}') {
             self.leave();
-            return self.require_fields::<T>(seen, open);
+            return self.require_fields::<T>(0, open);
         }
 
-        seen = self.object_members::<T>(value, seen)?;
+        let seen = self.object_members::<T>(value)?;
         self.leave();
         self.require_fields::<T>(seen, open)
     }
@@ -358,7 +364,7 @@ impl<'de, O: Options> Parser<'de, O> {
         open: usize,
     ) -> PResult<()> {
         let seen = if self.comma_or_close(b'}')? {
-            self.object_members::<T>(value, 0)?
+            self.object_members::<T>(value)?
         } else {
             0
         };
@@ -371,20 +377,34 @@ impl<'de, O: Options> Parser<'de, O> {
     ///
     /// The tag was the whole value, so anything after it is an unknown member
     /// and meets the policy that governs one. `{"type":"a"}` is the ordinary
-    /// case and costs a single `comma_or_close`.
-    pub fn finish_tagged_object(&mut self) -> PResult<()> {
+    /// case and costs a single `comma_or_close`. The `enter` is the caller's,
+    /// and is balanced here.
+    pub fn finish_internally_tagged(&mut self) -> PResult<()> {
         while self.comma_or_close(b'}')? {
             self.expect(b'"', ErrorCode::ExpectedQuote)?;
             if O::ERROR_ON_UNKNOWN_KEYS {
-                let key = self.idx;
-                self.skip_string_body()?;
-                self.idx = key;
-                return Err(ErrorCode::UnknownKey);
+                return self.unknown_key();
             }
             self.skip_unknown_member()?;
         }
         self.leave();
         Ok(())
+    }
+
+    /// Refuse the key at the cursor, which no field claimed.
+    ///
+    /// `match_key` fails identically for a key that differs and for one the
+    /// input ended in the middle of, so an unmatched key is not yet evidence
+    /// of a schema mismatch. Walking it to its closing quote is what tells the
+    /// two apart, and it reports the truncation itself. The cursor then goes
+    /// back to the key's first byte, so the position this error carries names
+    /// what was not recognized.
+    #[inline]
+    fn unknown_key(&mut self) -> PResult<()> {
+        let key = self.idx;
+        self.skip_string_body()?;
+        self.idx = key;
+        Err(ErrorCode::UnknownKey)
     }
 
     /// The member loop [`Self::read_object`] and [`Self::read_object_rest`]
@@ -395,9 +415,13 @@ impl<'de, O: Options> Parser<'de, O> {
     /// balances the caller's `enter` is not, both callers having a
     /// [`require_fields`](Self::require_fields) to run after it.
     #[inline]
-    fn object_members<T: ReadObject<'de>>(&mut self, value: &mut T, mut seen: u64) -> PResult<u64> {
+    fn object_members<T: ReadObject<'de>>(&mut self, value: &mut T) -> PResult<u64> {
         let map = T::MAP;
         let n = map.n as usize;
+        // One bit per field filled, compared once the object ends against the
+        // fields that had to be there. Never written, and so never read, unless
+        // the policy or the type asks for one.
+        let mut seen = 0u64;
 
         loop {
             self.expect(b'"', ErrorCode::ExpectedQuote)?;
@@ -413,17 +437,7 @@ impl<'de, O: Options> Parser<'de, O> {
             }
             if !matched {
                 if O::ERROR_ON_UNKNOWN_KEYS {
-                    // `match_key` fails identically for a key that differs
-                    // and for one the input ended in the middle of, so
-                    // reaching here is not yet evidence of a schema mismatch.
-                    // Walking the key to its closing quote is what tells the
-                    // two apart, and it reports the truncation itself.
-                    let key = self.idx;
-                    self.skip_string_body()?;
-                    // Back to the first byte of the key, so the position this
-                    // error carries names what was not recognized.
-                    self.idx = key;
-                    return Err(ErrorCode::UnknownKey);
+                    return self.unknown_key().map(|()| 0);
                 }
                 self.skip_unknown_member()?;
             }
@@ -513,13 +527,17 @@ impl<'de, O: Options> Parser<'de, O> {
         }
     }
 
-    /// The half [`Self::read_enum`]'s two arms share: hash the name at the
-    /// cursor, hand the candidate to `take`, and report a name nothing claimed
-    /// against the name itself.
+    /// The half [`Self::read_enum`]'s two arms share, and
+    /// [`Self::read_internally_tagged`] with them: hash the name at the cursor,
+    /// hand the candidate to `take`, and report a name nothing claimed against
+    /// the name itself.
+    ///
+    /// Bounded on [`Variants`] rather than on [`ReadEnum`], which is all the
+    /// body needs and is what lets the internally tagged reader share it.
     #[inline]
     fn dispatch_variant<T, F>(&mut self, value: &mut T, take: F) -> PResult<()>
     where
-        T: ReadEnum<'de>,
+        T: Variants,
         F: FnOnce(&mut T, usize, &mut Self) -> PResult<bool>,
     {
         let map = T::MAP;
@@ -583,6 +601,11 @@ impl<'de, O: Options> Parser<'de, O> {
         let first = self.idx;
         self.expect(b'"', ErrorCode::ExpectedQuote)?;
         if !self.match_key(T::TAG) {
+            // `match_key` fails identically for a key that differs and for one
+            // the input ended in the middle of, so walk it first: a document
+            // that ended is not a document that put its tag in the wrong
+            // place, and the two must not be reported alike.
+            self.skip_string_body()?;
             self.idx = first;
             return Err(ErrorCode::ExpectedTag);
         }
@@ -590,26 +613,19 @@ impl<'de, O: Options> Parser<'de, O> {
         // The tag's value names the variant, so it is a string or it is
         // nothing this can dispatch on. Reported against the whole member: the
         // key was right and the value under it was not a name.
-        if self.peek() != Some(b'"') {
-            self.idx = first;
-            return Err(ErrorCode::ExpectedTag);
+        match self.peek() {
+            Some(b'"') => self.idx += 1,
+            Some(_) => {
+                self.idx = first;
+                return Err(ErrorCode::ExpectedTag);
+            }
+            None => return Err(ErrorCode::UnexpectedEnd),
         }
-        self.idx += 1;
 
         // From here the generated arm owns the rest of the object, closing
-        // brace included, because only it knows the payload's type.
-        let map = T::MAP;
-        let at = self.idx;
-        let index = map.lookup(T::VARIANTS, self.rest());
-        if index < map.n as usize && T::read_variant(value, index, self, open)? {
-            return Ok(());
-        }
-        // A name nothing claimed, told apart from a truncated one exactly as
-        // `dispatch_variant` tells them apart, and for the same reason.
-        self.idx = at;
-        self.skip_string_body()?;
-        self.idx = at;
-        Err(ErrorCode::UnknownVariant)
+        // brace included, because only it knows the payload's type. The
+        // lookup, and a name nothing claims, are `read_enum`'s exactly.
+        self.dispatch_variant(value, |v, i, p| T::read_variant(v, i, p, open))
     }
 
     /// Read a JSON array into a type declared with `array!`.

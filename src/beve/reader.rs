@@ -321,8 +321,19 @@ impl<'de, O: Options> Reader<'de, O> {
         }
     }
 
+    /// Leave a container [`enter`](Self::enter) counted.
+    ///
+    /// The two are balanced by the caller, and the public
+    /// `read_object_rest` / `finish_internally_tagged` pair takes its `enter`
+    /// from whoever opened the object. A hand-written impl that calls one of
+    /// those without having entered would wrap the depth and silently disable
+    /// the nesting limit for the rest of the parse, so a debug build says so.
     #[inline(always)]
     pub(crate) fn leave(&mut self) {
+        debug_assert!(
+            self.depth > 0,
+            "structio: `leave` without a matching `enter`, which would disable the nesting limit"
+        );
         self.depth -= 1;
     }
 
@@ -745,7 +756,7 @@ impl<'de, O: Options> Reader<'de, O> {
     /// The tag was the whole value, so anything after it is an unknown member
     /// and meets the policy that governs one. The `enter` is the caller's, and
     /// is balanced here.
-    pub fn finish_tagged_object(&mut self, remaining: usize) -> PResult<()> {
+    pub fn finish_internally_tagged(&mut self, remaining: usize) -> PResult<()> {
         for _ in 0..remaining {
             let n = self.count()?;
             let at = self.pos;

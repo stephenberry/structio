@@ -14,7 +14,9 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
   A payload must be an object (a compile error naming `WriteObject` otherwise), since its members share the object with the tag. Everything else carries over: renaming, case rules, generics, borrowed payloads, reading into an existing value, and the policies. The result is an ordinary object, so pointers, validation and transcoding walk it with no knowledge of enums at all.
 
-- `Parser::read_object_rest`, `Parser::finish_tagged_object`, `Reader::read_object_rest` and `Reader::finish_tagged_object`, for hand-written impls of the two new `ReadInternallyTagged` traits.
+- `Parser::read_object_rest` and `Parser::finish_internally_tagged`, their `Reader` counterparts, and `Writer::write_internally_tagged` in both formats, for hand-written impls of the two new `ReadInternallyTagged` traits. A variant carrying nothing writes through the existing `write_tagged`, the bytes being the same object of one member.
+
+  Note that a tag sharing its name with a payload field writes that name twice. structio reads it back; a last-wins parser does not. The payload's type is not in the declaration, so the macro cannot check this — see [docs/enums.md](docs/enums.md#choose-a-tag-no-payload-uses).
 
 ## [0.2.2] - 2026-09-02
 
