@@ -6,6 +6,10 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ## [Unreleased]
 
+### Changed
+
+- Reading arrays of integers is 38-43% faster, and the representative `mixed` document 11%. The element loop was making a function call per element, which spilled the parser's cursor to the stack and reloaded it on every return; `parse_u64` now keeps a small fast path for the common short number and hands the rare cases to an out-of-line one, which is enough for the whole read to inline. JSON whitespace is answered from a table rather than a bitmask that needed a range guard in front of it. No API or output change.
+
 ### Fixed
 
 - `read_array_into` and `from_reader_array` read a **complex array**. They read the typed-array tag and stopped at the extension's, so the one shape that most needs a streaming block read — a buffer of IQ samples, which a consumer can least afford to hold twice — had to go through `from_reader` and hold the encoded document alongside the vector. The payload was always a block: interleaved `(re, im)` components are the in-memory form of `[Complex<T>]` for the same reason a typed array's payload is the in-memory form of `[T]`. Only the preamble differed.

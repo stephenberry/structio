@@ -155,7 +155,14 @@ impl Write for () {
 macro_rules! impl_int {
     ($wide:ty, $read:ident, $write:ident; $($t:ty),*) => {$(
         impl<'de> Read<'de> for $t {
-            #[inline]
+            // Always, rather than a hint. This is what an array of integers
+            // calls once per element, and a call here is dear: it spills the
+            // parser's cursor to the stack and reloads it on return, which
+            // costs more than the digits do. The body is two lines over a
+            // reader that is itself shaped to be inlined; what pushes the
+            // signed case past the threshold without this is the sign test and
+            // the range narrowing, neither of which is worth a call.
+            #[inline(always)]
             fn read<O: Options>(&mut self, p: &mut Parser<'de, O>) -> PResult<()> {
                 let v = p.$read()?;
                 *self = <$t>::try_from(v).map_err(|_| ErrorCode::NumberOutOfRange)?;

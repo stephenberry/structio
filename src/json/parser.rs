@@ -601,14 +601,21 @@ impl<'de, O: Options> Parser<'de, O> {
         }
     }
 
-    #[inline]
+    /// Always inlined, like [`read_i64`](Self::read_i64) and for the same
+    /// reason: these are what an array of integers calls per element, and the
+    /// cost of a call there is not the call but the parser's cursor, which has
+    /// to be spilled to the stack and reloaded around it. Left as a hint, the
+    /// signed reader stops being inlined the moment anything downstream of it
+    /// grows, and the array read loses about a fifth of its throughput without
+    /// any source change nearby to explain it.
+    #[inline(always)]
     pub fn read_u64(&mut self) -> PResult<u64> {
         let v = parse_u64(self.data, &mut self.idx)?;
         reject_float_tail(self.data, self.idx)?;
         Ok(v)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn read_i64(&mut self) -> PResult<i64> {
         let v = parse_i64(self.data, &mut self.idx)?;
         reject_float_tail(self.data, self.idx)?;
@@ -1073,6 +1080,22 @@ impl<'de, O: Options> Parser<'de, O> {
     }
 }
 
+/// [`is_ws`] as a lookup rather than a comparison.
+///
+/// The comparisons do not stay comparisons: a four-way `matches!` becomes a
+/// shift and a mask against a 64-bit set, and that needs a range guard in
+/// front of it, since a byte of 64 or more would shift out of the word. The
+/// load has no such problem. This is `glz::whitespace_table`, for the same
+/// reason.
+const WHITESPACE: [bool; 256] = {
+    let mut t = [false; 256];
+    t[b' ' as usize] = true;
+    t[b'\t' as usize] = true;
+    t[b'\n' as usize] = true;
+    t[b'\r' as usize] = true;
+    t
+};
+
 /// The four bytes JSON calls whitespace.
 ///
 /// The one definition of it in the crate. The reader and the
@@ -1082,7 +1105,7 @@ impl<'de, O: Options> Parser<'de, O> {
 /// do is disagree about what whitespace is.
 #[inline(always)]
 pub(crate) const fn is_ws(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r')
+    WHITESPACE[c as usize]
 }
 
 /// Could this byte be part of a number or one of the three literals?
