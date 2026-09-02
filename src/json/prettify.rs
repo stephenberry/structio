@@ -123,6 +123,9 @@ pub fn prettify_into(input: &str, out: &mut String) -> Result<()> {
 /// [`prettify_into`] under an explicit [write policy](crate::Options).
 pub fn prettify_into_with<O: Options>(input: &str, out: &mut String) -> Result<()> {
     let mut buf = core::mem::take(out).into_bytes();
+    // Emptied before the reserve for `minify_into_with`'s reason: `reserve`
+    // counts from the length, so clearing has to happen first rather than
+    // being left to `Writer::from_vec`.
     buf.clear();
     // Indenting roughly doubles a document of small values, which is the shape
     // that gets prettified; compacting never grows one. Either way this is the

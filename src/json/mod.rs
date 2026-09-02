@@ -162,8 +162,7 @@ pub fn write_into<T: Write + ?Sized>(value: &T, out: &mut String) {
 /// [`write_into`] under an explicit [write policy](crate::Options).
 #[inline]
 pub fn write_into_with<O: Options, T: Write + ?Sized>(value: &T, out: &mut String) {
-    let mut buf = core::mem::take(out).into_bytes();
-    buf.clear();
+    let buf = core::mem::take(out).into_bytes();
     let mut w = Writer::<O>::from_vec(buf);
     value.write(&mut w);
     *out = w.into_string();

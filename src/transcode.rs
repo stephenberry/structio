@@ -124,8 +124,7 @@ pub fn beve_to_json_into(input: &[u8], out: &mut String) -> Result<()> {
 
 /// [`beve_to_json_into`] under an explicit [write policy](crate::Options).
 pub fn beve_to_json_into_with<O: Options>(input: &[u8], out: &mut String) -> Result<()> {
-    let mut buf = core::mem::take(out).into_bytes();
-    buf.clear();
+    let buf = core::mem::take(out).into_bytes();
     let mut w = Writer::<O>::from_vec(buf);
     let result = transcode(input, &mut w);
     *out = w.into_string();

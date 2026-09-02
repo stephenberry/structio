@@ -106,6 +106,10 @@ pub fn minify_into(input: &str, out: &mut String) -> Result<()> {
 /// [`minify_into`] under an explicit [policy](crate::Options).
 pub fn minify_into_with<O: Options>(input: &str, out: &mut String) -> Result<()> {
     let mut buf = core::mem::take(out).into_bytes();
+    // Emptied before the reserve rather than left to `Writer::from_vec`, which
+    // would clear it a moment later anyway: `reserve` counts from the length,
+    // so a buffer still holding the caller's last document would ask for that
+    // much more than the output needs.
     buf.clear();
     // Minifying only ever removes bytes, so the input's length is an exact
     // bound rather than a guess, and this is the only allocation there is. The
