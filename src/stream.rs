@@ -77,7 +77,24 @@ pub(crate) struct Window<F> {
 }
 
 impl<F: Framer> Window<F> {
-    pub(crate) fn new(split: F, capacity: usize) -> Self {
+    /// A window whose buffer is allocated when it is first needed.
+    ///
+    /// [`Self::fill`] resizes to exactly one chunk, so a pull reader ends up
+    /// with a buffer the size of the reads it asked for rather than one an
+    /// earlier constructor guessed at. That is what lets a caller decoding a
+    /// small resident document choose to pay for a small window, and it costs
+    /// the default path nothing: the first fill allocates 64 KiB in the one
+    /// allocation `with_capacity` used to make.
+    pub(crate) fn new(split: F) -> Self {
+        Self::with_capacity(split, 0)
+    }
+
+    /// A window holding `capacity` bytes from the start.
+    ///
+    /// For the push side, where bytes arrive by [`Self::extend`] and there is
+    /// no chunk size to size the buffer by; without this a feed would grow its
+    /// window a doubling at a time.
+    pub(crate) fn with_capacity(split: F, capacity: usize) -> Self {
         Window {
             buf: Vec::with_capacity(capacity),
             split,

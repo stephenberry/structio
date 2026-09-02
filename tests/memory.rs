@@ -182,8 +182,9 @@ fn streaming_an_array_does_not_hold_the_file() {
     let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
 
     assert_eq!(sum, (0..ELEMENTS).map(|i| i as f64).sum::<f64>());
-    // The window is 64 KiB before a byte is read, so the bound is that plus
-    // room for the harness, and still far under the 4 MiB the file occupies.
+    // The window is one read chunk, 64 KiB by default, so the bound is that
+    // plus room for the harness, and still far under the 4 MiB the file
+    // occupies.
     assert!(
         peak < 512 * 1024,
         "streaming a {}-byte file peaked at {peak} bytes",
@@ -373,5 +374,43 @@ fn a_lying_count_allocates_what_arrives_and_not_what_it_claims() {
     assert!(
         peak < 4 * 1024 * 1024,
         "a count of four billion elements asked for {peak} bytes"
+    );
+}
+
+/// The read size bounds the window, not just the read.
+///
+/// A caller decoding a document that is already resident is paying the window
+/// for nothing but the copy into it, and 64 KiB to copy a few dozen bytes is a
+/// reason to reach for something else. So the buffer is allocated on the first
+/// fill and holds one chunk, which makes `read_size` the knob for that case;
+/// before, it set the read length against a buffer already allocated at the
+/// default and the caller had no way down from it.
+///
+/// Ignored under Miri as the tests above are: it is about how many bytes are
+/// asked for, which Miri does not change.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_read_size_bounds_the_window() {
+    let _serial = serial();
+    let file = structio::to_beve(&vec![1.5f64, 2.5]);
+
+    let base = LIVE.load(Ordering::Relaxed);
+    PEAK.store(base, Ordering::Relaxed);
+    let mut docs = beve::Documents::array(&file[..]).read_size(256);
+    let mut value = 0.0f64;
+    let mut got = Vec::new();
+    while let Some(result) = docs.next_value_into(&mut value) {
+        result.unwrap();
+        got.push(value);
+    }
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+
+    assert_eq!(got, [1.5, 2.5]);
+    // Generous next to the 256 bytes asked for, because the harness allocates
+    // on threads this lock does not reach, and still far under the 64 KiB the
+    // default window would have cost.
+    assert!(
+        peak < 16 * 1024,
+        "a 256-byte read size peaked at {peak} bytes"
     );
 }

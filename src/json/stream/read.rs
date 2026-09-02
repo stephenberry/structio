@@ -57,7 +57,7 @@ impl<R: io::Read> Documents<R> {
     pub fn new(reader: R, mode: Mode) -> Self {
         Documents {
             reader,
-            win: Window::new(Splitter::new(mode), DEFAULT_BUFFER),
+            win: Window::new(Splitter::new(mode)),
             chunk: DEFAULT_BUFFER,
             options: PhantomData,
         }
@@ -102,6 +102,12 @@ impl<R: io::Read, O: Options> Documents<R, O> {
     }
 
     /// How many bytes to request per read. Defaults to 64 KiB.
+    ///
+    /// It sizes the window as well as the read: the buffer is allocated on the
+    /// first fill and holds one chunk, so this is the knob for a caller who is
+    /// decoding a small document that is already in memory and does not want
+    /// 64 KiB of buffer behind it. Set it larger than a value and the value is
+    /// still buffered whole; the window grows to whatever one value needs.
     #[must_use = "read_size returns a configured reader and consumes the old one"]
     pub fn read_size(mut self, bytes: usize) -> Self {
         self.chunk = bytes.max(1);

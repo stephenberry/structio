@@ -81,7 +81,7 @@ impl Feed {
     /// Build with an explicit [`Mode`].
     pub fn new(mode: Mode) -> Self {
         Feed {
-            win: Window::new(Splitter::new(mode), DEFAULT_BUFFER),
+            win: Window::with_capacity(Splitter::new(mode), DEFAULT_BUFFER),
             options: PhantomData,
         }
     }

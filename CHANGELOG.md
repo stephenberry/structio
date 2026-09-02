@@ -8,6 +8,7 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ### Changed
 
+- `Documents::read_size` sizes the window as well as the read. The buffer is allocated on the first fill and holds one chunk, so `Documents::array(bytes).read_size(4096)` costs 4 KiB rather than the 64 KiB it allocated up front before, whatever the read size said. This is the knob for decoding a small document that is already in memory, where a default window is a thousand times the document. Applies to both `json::Documents` and `beve::Documents`; `Feed` is unchanged, having no chunk size to go by.
 - `beve::Reader::read_seq` documents that element positions do not bound documents. A typed array's element headers, a complex array's, and a boolean run's are supplied by the reader rather than present in the input, so a span cut between two `position()` calls is not a value `Reader::new` can read. Use `Documents::array` to take elements as documents of their own.
 
 ## [0.2.0] - 2026-09-02

@@ -54,6 +54,13 @@ let mut docs = structio::Documents::lines(file).with_options::<structio::SkipUnk
 
 `Feed` takes the same method.
 
+`read_size` sizes the window as well as the read: the buffer is allocated on the first fill and holds one chunk. That matters most where streaming is not what you are after. A document already resident in memory can still be worth reading through `Documents` -- it is what hands out the elements of a *typed* array one at a time, headers installed, which a walk over spans cannot do -- and there the default 64 KiB window is buffer for a copy you are only making to get that. Ask for a small one:
+
+```rust
+let mut docs = structio::beve::Documents::array(&bytes[..]).read_size(256);
+```
+
+
 ## Being handed bytes
 
 `Feed` is the same machine driven from the other side, for when something gives you chunks rather than letting you ask for them:
