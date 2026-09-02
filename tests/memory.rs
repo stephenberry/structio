@@ -9,14 +9,16 @@
 //! largest single value rather than the size of the file -- and it is checked
 //! here for the same reason.
 //!
-//! This is its own test binary because the counter below is process wide.
-//! Another test allocating on another thread would be counted here too, so the
-//! tests here take a lock for their whole bodies and their bounds are still
-//! generous: the harness itself allocates on threads no lock here reaches.
+//! This is its own test binary because a global allocator is process wide, and
+//! the counter below is per thread for the same reason: a test measuring what
+//! one call asks for must not see what the harness, or another test, allocates
+//! beside it. Every test here runs on its own thread and the code it measures
+//! is single threaded, so what the counter sees is exactly the call under test.
+//! A process-wide counter needed a lock the harness did not take, and the
+//! bounds drifted with whatever else the runner happened to be doing.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use structio::beve;
 
@@ -24,20 +26,40 @@ use structio::beve;
 // A global allocator that remembers how far it got
 // ---------------------------------------------------------------------------
 
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Bytes this thread has asked for and not given back. Signed because a
+    /// buffer allocated before a measurement began and freed inside it takes
+    /// the count below where it started, which is honest and not an error.
+    static LIVE: Cell<isize> = const { Cell::new(0) };
+    /// The high-water mark of the above, reset at the start of a measurement.
+    static PEAK: Cell<isize> = const { Cell::new(0) };
+}
 
 struct Tracking;
 
 /// Records the high-water mark of live bytes. Called from inside the
-/// allocator, so it must not allocate: two atomics and nothing else.
+/// allocator, so it must not allocate: the two cells are `const`-initialized
+/// and hold no destructor, which is what keeps reading them from reaching the
+/// allocator again. `try_with` because a thread whose locals have already been
+/// destroyed may still free something, and that is nothing to measure.
 fn note(delta: isize) {
-    let live = if delta >= 0 {
-        LIVE.fetch_add(delta as usize, Ordering::Relaxed) + delta as usize
-    } else {
-        LIVE.fetch_sub(delta.unsigned_abs(), Ordering::Relaxed) - delta.unsigned_abs()
-    };
-    PEAK.fetch_max(live, Ordering::Relaxed);
+    let _ = LIVE.try_with(|live| {
+        let now = live.get() + delta;
+        live.set(now);
+        let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+    });
+}
+
+/// Start a measurement, returning the baseline to compare against.
+fn measuring() -> isize {
+    let base = LIVE.get();
+    PEAK.set(base);
+    base
+}
+
+/// The most bytes live at once since `base` was taken, over the baseline.
+fn peak_over(base: isize) -> usize {
+    PEAK.get().saturating_sub(base).max(0) as usize
 }
 
 // SAFETY: every method forwards to `System` unchanged and returns exactly what
@@ -67,15 +89,6 @@ unsafe impl GlobalAlloc for Tracking {
 
 #[global_allocator]
 static ALLOC: Tracking = Tracking;
-
-/// Held for the whole of each test below, building the document included: two
-/// measurements running at once would each be counting the other's work.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-/// The lock, tolerating a panic in another test rather than compounding it.
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 // ---------------------------------------------------------------------------
 
@@ -117,7 +130,6 @@ impl std::io::Write for Discard {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_sink_writer_does_not_grow_to_hold_the_largest_value() {
-    let _serial = serial();
     const CAP: usize = 512;
     const BIG: usize = 4 * 1024 * 1024;
 
@@ -129,21 +141,19 @@ fn a_sink_writer_does_not_grow_to_hold_the_largest_value() {
     };
     let mut sink = Discard(0);
 
-    let base = LIVE.load(Ordering::Relaxed);
-    PEAK.store(base, Ordering::Relaxed);
+    let base = measuring();
     beve::to_writer_buffered(&value, &mut sink, CAP).unwrap();
-    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let peak = peak_over(base);
 
     assert_eq!(
         sink.0,
         structio::to_beve(&value).len(),
         "wrote the wrong bytes"
     );
-    // Generous next to the 512 bytes the writer actually asks for, because the
-    // test harness may allocate on another thread while this runs, and still
-    // three orders of magnitude under the 4 MiB a buffered payload would take.
+    // The buffer and nothing besides, against the 4 MiB a buffered payload
+    // would take.
     assert!(
-        peak < 64 * 1024,
+        peak <= CAP,
         "writing a {BIG}-byte value through a {CAP}-byte buffer peaked at {peak} bytes"
     );
 }
@@ -164,29 +174,28 @@ fn a_sink_writer_does_not_grow_to_hold_the_largest_value() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn streaming_an_array_does_not_hold_the_file() {
-    let _serial = serial();
     const ELEMENTS: usize = 512 * 1024;
 
     let file = structio::to_beve(&(0..ELEMENTS).map(|i| i as f64).collect::<Vec<f64>>());
     assert!(file.len() > 4 * 1024 * 1024);
     let mut sum = 0.0;
 
-    let base = LIVE.load(Ordering::Relaxed);
-    PEAK.store(base, Ordering::Relaxed);
+    let base = measuring();
     let mut docs = beve::Documents::array(&file[..]);
     let mut value = 0.0f64;
     while let Some(result) = docs.next_value_into(&mut value) {
         result.unwrap();
         sum += value;
     }
-    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let peak = peak_over(base);
 
     assert_eq!(sum, (0..ELEMENTS).map(|i| i as f64).sum::<f64>());
-    // The window is one read chunk, 64 KiB by default, so the bound is that
-    // plus room for the harness, and still far under the 4 MiB the file
-    // occupies.
+    // The window is one read chunk, 64 KiB by default, and reaches twice that
+    // once it has grown past a chunk with a partial value still in front. The
+    // bound leaves room for a growth step either way, and is far under the
+    // 4 MiB the file occupies.
     assert!(
-        peak < 512 * 1024,
+        peak < 256 * 1024,
         "streaming a {}-byte file peaked at {peak} bytes",
         file.len()
     );
@@ -207,7 +216,6 @@ fn streaming_an_array_does_not_hold_the_file() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn measuring_a_value_allocates_nothing() {
-    let _serial = serial();
     const BIG: usize = 4 * 1024 * 1024;
 
     let value = Blob {
@@ -218,12 +226,11 @@ fn measuring_a_value_allocates_nothing() {
     // the aligned form would pad and so exercises none of it.
     let samples = vec![1.5f64; BIG / 8];
 
-    let base = LIVE.load(Ordering::Relaxed);
-    PEAK.store(base, Ordering::Relaxed);
+    let base = measuring();
     let size = beve::size(&value);
     let aligned = beve::size_aligned(&samples);
     let framed = beve::size_aligned_after(&samples, 12);
-    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let peak = peak_over(base);
 
     assert_eq!(size, structio::to_beve(&value).len());
     assert_eq!(aligned, structio::to_beve_aligned(&samples).len());
@@ -255,7 +262,6 @@ fn measuring_a_value_allocates_nothing() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn appending_a_listing_allocates_nothing() {
-    let _serial = serial();
     const ENTRIES: usize = 64;
     const ENTRY: usize = 4096;
 
@@ -268,16 +274,15 @@ fn appending_a_listing_allocates_nothing() {
     listing.push(b'[');
     let ptr = listing.as_ptr();
 
-    let base = LIVE.load(Ordering::Relaxed);
-    PEAK.store(base, Ordering::Relaxed);
+    let base = measuring();
     for _ in 0..ENTRIES {
         structio::append(&value, &mut listing);
         listing.push(b',');
     }
-    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let peak = peak_over(base);
 
     *listing.last_mut().unwrap() = b']';
-    assert!(peak < 1024, "appending asked for {peak} bytes");
+    assert_eq!(peak, 0, "appending asked for {peak} bytes");
     // The one buffer throughout, and the header still in front of it.
     assert!(std::ptr::eq(listing.as_ptr(), ptr));
     assert_eq!(&listing[..48], &[0u8; 48]);
@@ -304,24 +309,21 @@ fn appending_a_listing_allocates_nothing() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn reading_an_array_from_a_reader_does_not_hold_the_encoding() {
-    let _serial = serial();
     const ELEMENTS: usize = 512 * 1024;
     const PAYLOAD: usize = ELEMENTS * size_of::<f64>();
 
     let file = structio::to_beve(&(0..ELEMENTS).map(|i| i as f64).collect::<Vec<f64>>());
     assert!(file.len() > PAYLOAD);
 
-    let base = LIVE.load(Ordering::Relaxed);
-    PEAK.store(base, Ordering::Relaxed);
+    let base = measuring();
     let slurped: Vec<f64> = beve::from_reader(&file[..]).unwrap();
-    let slurped_peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let slurped_peak = peak_over(base);
     drop(slurped);
 
-    let base = LIVE.load(Ordering::Relaxed);
-    PEAK.store(base, Ordering::Relaxed);
+    let base = measuring();
     let mut streamed: Vec<f64> = Vec::new();
     beve::read_array_into(&mut streamed, &file[..]).unwrap();
-    let streamed_peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let streamed_peak = peak_over(base);
 
     assert_eq!(streamed.len(), ELEMENTS);
     assert_eq!(streamed[ELEMENTS - 1], (ELEMENTS - 1) as f64);
@@ -353,7 +355,6 @@ fn reading_an_array_from_a_reader_does_not_hold_the_encoding() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_lying_count_allocates_what_arrives_and_not_what_it_claims() {
-    let _serial = serial();
     use structio::beve::header;
 
     let mut doc = vec![header::array_of(header::CAT_FLOAT, 3)];
@@ -362,10 +363,9 @@ fn a_lying_count_allocates_what_arrives_and_not_what_it_claims() {
     doc.extend_from_slice(&size[..used]);
     doc.extend_from_slice(&[0u8; 1024]);
 
-    let base = LIVE.load(Ordering::Relaxed);
-    PEAK.store(base, Ordering::Relaxed);
+    let base = measuring();
     let err = beve::from_reader_array::<f64, _>(&doc[..]).unwrap_err();
-    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let peak = peak_over(base);
 
     assert_eq!(
         err.as_parse().unwrap().code,
@@ -391,11 +391,9 @@ fn a_lying_count_allocates_what_arrives_and_not_what_it_claims() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_read_size_bounds_the_window() {
-    let _serial = serial();
     let file = structio::to_beve(&vec![1.5f64, 2.5]);
 
-    let base = LIVE.load(Ordering::Relaxed);
-    PEAK.store(base, Ordering::Relaxed);
+    let base = measuring();
     let mut docs = beve::Documents::array(&file[..]).read_size(256);
     let mut value = 0.0f64;
     let mut got = Vec::new();
@@ -403,14 +401,10 @@ fn the_read_size_bounds_the_window() {
         result.unwrap();
         got.push(value);
     }
-    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let peak = peak_over(base);
 
     assert_eq!(got, [1.5, 2.5]);
-    // Generous next to the 256 bytes asked for, because the harness allocates
-    // on threads this lock does not reach, and still far under the 64 KiB the
-    // default window would have cost.
-    assert!(
-        peak < 16 * 1024,
-        "a 256-byte read size peaked at {peak} bytes"
-    );
+    // The window, plus the vector the values are collected into. Far under the
+    // 64 KiB the default window would have cost.
+    assert!(peak < 1024, "a 256-byte read size peaked at {peak} bytes");
 }
