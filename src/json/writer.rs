@@ -189,6 +189,53 @@ impl<O: Options> Writer<'static, O> {
     }
 }
 
+/// Write into `out` in place, giving the buffer back whatever happens.
+///
+/// The buffer has to move into the writer, so an unwind out of `write` would
+/// drop it, and with it whatever the caller had put in front of this document:
+/// a protocol header, or the entries already written into a listing. Those
+/// bytes are the one part of the buffer the call was never meant to touch, and
+/// an unwind is in contract rather than a caller's bug, since a
+/// [`WriteAs`](crate::json::WriteAs) adapter whose target has values it cannot
+/// encode is told to write a substitute or panic.
+///
+/// So `out` comes back holding the whole buffer if `write` returned, and
+/// exactly the bytes it held before if `write` unwound.
+pub(crate) fn append_in_place<O: Options>(
+    out: &mut Vec<u8>,
+    make: impl FnOnce(Vec<u8>) -> Writer<'static, O>,
+    write: impl FnOnce(&mut Writer<'static, O>),
+) {
+    /// Holds the buffer for the write and hands it back in `Drop`, which is
+    /// what makes the unwind path and the ordinary one the same code.
+    struct Handback<'o, O: Options> {
+        w: Writer<'static, O>,
+        out: &'o mut Vec<u8>,
+        /// How much of the buffer to keep: the length the caller's own bytes
+        /// had, until the value is written whole and there is nothing to cut.
+        keep: usize,
+    }
+
+    impl<O: Options> Drop for Handback<'_, O> {
+        fn drop(&mut self) {
+            // By hand rather than through `into_vec`, which takes the writer
+            // by value; a `Drop` has only the borrow.
+            let mut buf = core::mem::take(&mut self.w.buf);
+            buf.truncate(self.keep);
+            *self.out = buf;
+        }
+    }
+
+    let keep = out.len();
+    let mut h = Handback {
+        w: make(core::mem::take(out)),
+        out,
+        keep,
+    };
+    write(&mut h.w);
+    h.keep = usize::MAX;
+}
+
 impl<'a, O: Options> Writer<'a, O> {
     /// Write through to `out`, buffering [`DEFAULT_SINK_BUFFER`] bytes at a
     /// time.

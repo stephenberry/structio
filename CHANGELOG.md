@@ -12,6 +12,7 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ### Changed
 
+- `json::append`, `beve::append` and `beve::append_aligned` leave the buffer exactly as they found it if writing the value panics. The buffer moves into the writer, so an unwind used to drop it along with the bytes in front of the document -- a header, or the entries already in a listing -- which the call was never meant to touch. A `Write` impl may panic by design: an adapter whose target has values it cannot encode is told to substitute or panic. `write_into` still leaves its buffer empty there, its contents being the call's to replace, and now says so.
 - `json::Writer::into_string` checks the bytes handed to `Writer::appending`, and panics if they are not UTF-8. Every other byte in the buffer is UTF-8 by construction; those are the only ones the writer did not produce. Use `into_vec` to append JSON behind a binary prefix.
 
 ## [0.1.0] - 2026-09-01

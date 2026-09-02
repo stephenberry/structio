@@ -154,6 +154,11 @@ pub fn to_string_with<O: Options, T: Write + ?Sized>(value: &T) -> String {
 
 /// Serialize into an existing `String`, replacing its contents and keeping its
 /// allocation.
+///
+/// The contents are this call's to replace, and it takes them before it writes
+/// anything, so a `Write` impl that panics leaves `out` empty rather than
+/// holding either document. [`append`] is the one that has bytes worth keeping
+/// and keeps them.
 #[inline]
 pub fn write_into<T: Write + ?Sized>(value: &T, out: &mut String) {
     write_into_with::<Standard, T>(value, out);
@@ -180,6 +185,13 @@ pub fn write_into_with<O: Options, T: Write + ?Sized>(value: &T, out: &mut Strin
 /// why this takes the buffer as bytes. [`Writer::appending`] is the same thing
 /// with the writer in hand, and is the way to append into a `String`.
 ///
+/// They are not lost either, if writing the value panics: `out` comes back
+/// holding exactly what it held before the call. A `Write` impl may panic by
+/// design, an adapter whose target has values it cannot encode being told to
+/// substitute or panic, and the bytes in front are the caller's rather than
+/// this call's to spend. [`write_into`] makes the other bargain, its buffer
+/// being one it was asked to overwrite.
+///
 /// ```
 /// # #[derive(Default)]
 /// # struct Reading { id: u32 }
@@ -197,10 +209,7 @@ pub fn append<T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
 /// [`append`] under an explicit [write policy](crate::Options).
 #[inline]
 pub fn append_with<O: Options, T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
-    let buf = core::mem::take(out);
-    let mut w = Writer::<O>::appending(buf);
-    value.write(&mut w);
-    *out = w.into_vec();
+    writer::append_in_place(out, Writer::<O>::appending, |w| value.write(w));
 }
 
 /// Serialize to a byte vector.

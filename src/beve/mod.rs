@@ -395,6 +395,11 @@ pub fn to_vec_aligned_with<O: Options, T: Write + ?Sized>(value: &T) -> Vec<u8> 
 
 /// Serialize into an existing buffer, replacing its contents and keeping its
 /// allocation.
+///
+/// The contents are this call's to replace, and it takes them before it writes
+/// anything, so a `Write` impl that panics leaves `out` empty rather than
+/// holding either document. [`append`] is the one that has bytes worth keeping
+/// and keeps them.
 #[inline]
 pub fn write_into<T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
     write_into_with::<Standard, T>(value, out);
@@ -420,6 +425,13 @@ pub fn write_into_with<O: Options, T: Write + ?Sized>(value: &T, out: &mut Vec<u
 /// [`Writer::offset`] lands them where they will really sit. [`size_after`] is
 /// the matching measurement: `size_after(value, out.len())` is what this will
 /// add.
+///
+/// They are not lost either, if writing the value panics: `out` comes back
+/// holding exactly what it held before the call. A `Write` impl may panic by
+/// design, an adapter whose target has values it cannot encode being told to
+/// substitute or panic, and the bytes in front are the caller's rather than
+/// this call's to spend. [`write_into`] makes the other bargain, its buffer
+/// being one it was asked to overwrite.
 #[inline]
 pub fn append<T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
     append_with::<Standard, T>(value, out);
@@ -428,10 +440,7 @@ pub fn append<T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
 /// [`append`] under an explicit [write policy](crate::Options).
 #[inline]
 pub fn append_with<O: Options, T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
-    let buf = core::mem::take(out);
-    let mut w = Writer::<O>::appending(buf);
-    value.write(&mut w);
-    *out = w.into_vec();
+    writer::append_in_place(out, Writer::<O>::appending, |w| value.write(w));
 }
 
 /// Serialize a value's aligned form after what a buffer already holds.
@@ -454,7 +463,8 @@ pub fn append_with<O: Options, T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) 
 /// assert_eq!(structio::from_beve::<Vec<f64>>(&frame[12..]).unwrap(), samples);
 /// ```
 ///
-/// [`size_aligned_after`] is the matching measurement, as above.
+/// [`size_aligned_after`] is the matching measurement, as above, and a panic
+/// out of the value's `Write` impl leaves `out` as it was, as in [`append`].
 ///
 /// This takes the buffer for the document, which is right for a message
 /// assembled in one buffer and wrong for the two cases where it is not. A body
@@ -492,10 +502,11 @@ pub fn append_aligned<T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
 /// [`append_aligned`] under an explicit [write policy](crate::Options).
 #[inline]
 pub fn append_aligned_with<O: Options, T: Write + ?Sized>(value: &T, out: &mut Vec<u8>) {
-    let buf = core::mem::take(out);
-    let mut w = Writer::<O>::appending(buf).aligned();
-    value.write(&mut w);
-    *out = w.into_vec();
+    writer::append_in_place(
+        out,
+        |buf| Writer::<O>::appending(buf).aligned(),
+        |w| value.write(w),
+    );
 }
 
 /// Serialize a value straight into an [`io::Write`].
