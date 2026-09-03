@@ -4,7 +4,9 @@ An enum's schema is its variant names, and they go on the wire as names rather t
 
 That is the one design decision everything else on this page follows from. BEVE has a type-tag extension that would do the job in fewer bytes, and it is deliberately not used: it is deprecated, and it tags by index, which is precisely the thing names are here to avoid.
 
-## Two wire forms, and no third
+## Two wire forms for a wrapping tag
+
+These are the two a variant takes when the name wraps the payload, which is what `unit_enum!` and a clause-free `tagged_enum!` write. [Internal tagging](#internal-tagging) moves the name inside the payload's object and has a wire form of its own; the rest of this page is about these two until then.
 
 | The variant | Is written as | Example |
 |---|---|---|
@@ -190,6 +192,80 @@ structio::from_beve_at::<f64>(&bytes, "/shape/Circle/radius")?;
 ```
 
 Tags stream like any other value, in either format, including across a chunk boundary that cuts one in half.
+
+## Internal tagging
+
+The two forms above are *external* tagging: the name wraps the payload. A **tag clause**, `as tag "kind"`, puts the name **inside** the payload's object instead, as a member beside the payload's own:
+
+```rust
+#[derive(Default)]
+struct Circle { radius: f64 }
+structio::object!(Circle { radius });
+
+#[derive(Default)]
+enum Shape {
+    #[default]
+    Empty,
+    Circle(Circle),
+}
+
+structio::tagged_enum!(Shape as tag "kind" { Empty, Circle(_) });
+```
+
+| The variant | No tag clause | `as tag "kind"` |
+|---|---|---|
+| Carries nothing | `"Empty"` | `{"kind":"Empty"}` |
+| Carries a value | `{"Circle":{"radius":1}}` | `{"kind":"Circle","radius":1}` |
+
+This is the convention most JSON APIs settled on, and the one a C++ Glaze `std::variant` with a declared tag produces. It is the only form here that a deduced variant can be made to agree with: external tagging has nowhere to put the payload's own keys.
+
+### The tag has to come first
+
+**A document whose object begins with any other key is `ExpectedTag`.** This crate reads in one pass with no lookahead and no buffering, so the member deciding which variant is being read has to arrive before the members whose meaning it decides. Finding a tag further in means holding the object somewhere or walking it twice, and neither is a thing this crate does.
+
+The restriction is on reading. Writing always puts the tag first, so a value this crate wrote reads back unconditionally, and so does one from any producer that emits its tag first — the conventional ordering, and what a declaration-ordered serializer does by default. A producer that puts it last is refused, loudly and with the offending key's position, rather than misread:
+
+```rust
+from_str::<Shape>(r#"{"kind":"Circle","radius":1}"#)?;  // reads
+from_str::<Shape>(r#"{"radius":1,"kind":"Circle"}"#);   // ExpectedTag, at "radius"
+```
+
+`ExpectedTag` also covers an object with no members and a tag whose value is not a string. Which of the three it was is not distinguished, because distinguishing them is the search being refused. A tag that *is* first and names nothing is `UnknownVariant` instead: it was found, and its value is not a variant.
+
+### What a payload may be
+
+An object, and nothing else. The variant's members share one object with the tag, so a payload with no members of its own has nowhere to go: `Sides(u32)` is a compile error naming `Keys`, then `WriteObject` and its neighbours, not a runtime surprise. Declare such a payload as a struct, or drop the clause: external tagging takes any payload because it gives it an object of its own.
+
+A variant carrying nothing is written as the tag alone. Members beside it are unknown members and meet the reader's policy exactly as a struct's would be: refused under `Standard`, stepped over under `SkipUnknown`.
+
+### A tag cannot be a payload's field
+
+The tag shares one object with the payload's members, so a tag whose name is also a payload field would write that name twice:
+
+```json
+{"kind":"Config","kind":"debug","level":3}
+```
+
+structio would read this back, taking the first member as the tag. **Nothing else would.** A last-wins parser — `JSON.parse`, and Glaze — sees `kind` as `"debug"` and the variant is gone. The field is unreadable here too: the tag is consumed before the payload's members are reached, so under `RequireKeys` it could never be filled.
+
+**This is a compile error**, so the shape above cannot be written:
+
+```
+error[E0080]: evaluation panicked: structio: the tag of an internally tagged enum is also
+a field of this variant's payload. ...
+  --> src/main.rs:7:1
+   |
+ 7 | structio::tagged_enum!(Setting as tag "kind" { Off, Config(_) });
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: inside `assert_tag_not_a_field::<Debugging, Setting>`
+```
+
+The payload's type is absent from the declaration, so the check reaches it through the variant's constructor, which is a value of type `fn(Payload) -> Self`. What it compares are *wire* names, so a collision that exists only after a case rule has run — a field `kind_of` under `"camelCase"` against a tag `"kindOf"` — is caught as well, and that one is invisible in the Rust source.
+
+A declaration with no generics is refused by `cargo check`. A generic one has no payload keys until it is instantiated, so it is refused when the crate is built, the same tier as a `Keys::REQUIRED` overflow. A variant carrying nothing is never checked: it shares its object with no members.
+
+Everything else on this page carries over, the clause being an addition to `tagged_enum!` rather than a declaration of its own. Renaming, case rules (which apply to the variant names, never to the tag key, that being a document key rather than a variant), generics, borrowed payloads, reading into an existing value, and `json_tagged_enum!` / `beve_tagged_enum!`, which take the clause too, all work as they do above. And because the result is an ordinary object, the rest of the crate needs to know even less about it than it does about an external tag: a pointer reaches `/kind` and `/radius` in the same object, with no enum-shaped step in the path.
 
 ## See also
 

@@ -307,7 +307,7 @@ pub use options::{
     AllowComments, Options, Pretty, PrettyInlineArrays, RequireKeys, SkipNull, SkipUnknown,
     Standard,
 };
-pub use traits::{Elements, Keys, ReadWrite, Same, Variants};
+pub use traits::{Elements, Keys, ReadWrite, Same, Variants, assert_tag_not_a_field};
 
 pub use json::{
     Documents, Feed, Mode, append, append_with, from_reader, from_reader_with, from_slice,

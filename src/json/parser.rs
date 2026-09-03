@@ -13,12 +13,12 @@
 use core::marker::PhantomData;
 
 use crate::error::{ErrorCode, PResult};
-use crate::json::traits::{Read, ReadArray, ReadEnum, ReadObject};
+use crate::json::traits::{Read, ReadArray, ReadEnum, ReadInternallyTagged, ReadObject};
 use crate::num::atof::{parse_float, scan_number};
 use crate::num::atoi::{parse_i64, parse_u64, reject_float_tail};
 use crate::options::{Options, Standard};
 use crate::swar::{escape_mask, find_byte, first_match, load_u64, needs_escape};
-use crate::traits::{Fields, Keys};
+use crate::traits::{Fields, Keys, Variants};
 
 /// Nesting limit, so a hostile document cannot exhaust the stack.
 pub const MAX_DEPTH: u32 = 256;
@@ -278,8 +278,24 @@ impl<'de, O: Options> Parser<'de, O> {
         }
     }
 
+    /// Leave a container [`enter`](Self::enter) counted.
+    ///
+    /// The two are balanced by the caller, and the public
+    /// `read_object_rest` / `finish_internally_tagged` pair takes its `enter`
+    /// from whoever opened the object. A hand-written impl that calls one of
+    /// those without having entered wraps the depth, and what that costs
+    /// depends on how often it happens: once, the next `enter` wraps it back
+    /// and the parse allows one extra level; repeatedly, the limit refuses
+    /// input it should have taken. It stops counting altogether only when a
+    /// stray `leave` cancels an `enter` at every level of a recursion, and
+    /// then a hostile document has no depth limit at all. A debug build says
+    /// so rather than leaving any of that to be discovered.
     #[inline(always)]
     pub(crate) fn leave(&mut self) {
+        debug_assert!(
+            self.depth > 0,
+            "structio: `leave` without a matching `enter`, which would disable the nesting limit"
+        );
         self.depth -= 1;
     }
 
@@ -324,18 +340,93 @@ impl<'de, O: Options> Parser<'de, O> {
         self.enter()?;
         self.skip_ws();
 
+        if self.try_byte(b'}') {
+            self.leave();
+            return self.require_fields::<T>(0, open);
+        }
+
+        let seen = self.object_members::<T>(value)?;
+        self.leave();
+        self.require_fields::<T>(seen, open)
+    }
+
+    /// Read the members of an object whose opening brace, and at least one
+    /// member, are already consumed.
+    ///
+    /// What [`Self::read_internally_tagged`] leaves behind: the tag has been
+    /// taken, and the rest of the object is the variant's payload. The cursor
+    /// sits where that tag's value ended, so the first thing to settle is
+    /// whether a comma follows it or the object is over.
+    ///
+    /// `open` is the offset of the object's opening brace, carried in because
+    /// a [`MissingKey`](ErrorCode::MissingKey) is reported against the object
+    /// rather than against the byte that closed it, and this is called after
+    /// the caller has walked past it. `enter` is the caller's too, and so is
+    /// balanced here by the `leave`.
+    pub fn read_object_rest<T: ReadObject<'de>>(
+        &mut self,
+        value: &mut T,
+        open: usize,
+    ) -> PResult<()> {
+        let seen = if self.comma_or_close(b'}')? {
+            self.object_members::<T>(value)?
+        } else {
+            0
+        };
+        self.leave();
+        self.require_fields::<T>(seen, open)
+    }
+
+    /// Consume the rest of an object that has no fields to fill: the form an
+    /// internally tagged variant carrying nothing takes.
+    ///
+    /// The tag was the whole value, so anything after it is an unknown member
+    /// and meets the policy that governs one. `{"type":"a"}` is the ordinary
+    /// case and costs a single `comma_or_close`. The `enter` is the caller's,
+    /// and is balanced here.
+    pub fn finish_internally_tagged(&mut self) -> PResult<()> {
+        while self.comma_or_close(b'}')? {
+            self.expect(b'"', ErrorCode::ExpectedQuote)?;
+            if O::ERROR_ON_UNKNOWN_KEYS {
+                return self.unknown_key();
+            }
+            self.skip_unknown_member()?;
+        }
+        self.leave();
+        Ok(())
+    }
+
+    /// Refuse the key at the cursor, which no field claimed.
+    ///
+    /// `match_key` fails identically for a key that differs and for one the
+    /// input ended in the middle of, so an unmatched key is not yet evidence
+    /// of a schema mismatch. Walking it to its closing quote is what tells the
+    /// two apart, and it reports the truncation itself. The cursor then goes
+    /// back to the key's first byte, so the position this error carries names
+    /// what was not recognized.
+    #[inline]
+    fn unknown_key(&mut self) -> PResult<()> {
+        let key = self.idx;
+        self.skip_string_body()?;
+        self.idx = key;
+        Err(ErrorCode::UnknownKey)
+    }
+
+    /// The member loop [`Self::read_object`] and [`Self::read_object_rest`]
+    /// share, the cursor sitting on a member's opening quote.
+    ///
+    /// Returns the fields filled, for the caller to check against the ones
+    /// that had to be. The closing brace is consumed here; the `leave` that
+    /// balances the caller's `enter` is not, both callers having a
+    /// [`require_fields`](Self::require_fields) to run after it.
+    #[inline]
+    fn object_members<T: ReadObject<'de>>(&mut self, value: &mut T) -> PResult<u64> {
+        let map = T::MAP;
+        let n = map.n as usize;
         // One bit per field filled, compared once the object ends against the
         // fields that had to be there. Never written, and so never read, unless
         // the policy or the type asks for one.
         let mut seen = 0u64;
-
-        if self.try_byte(b'}') {
-            self.leave();
-            return self.require_fields::<T>(seen, open);
-        }
-
-        let map = T::MAP;
-        let n = map.n as usize;
 
         loop {
             self.expect(b'"', ErrorCode::ExpectedQuote)?;
@@ -351,24 +442,13 @@ impl<'de, O: Options> Parser<'de, O> {
             }
             if !matched {
                 if O::ERROR_ON_UNKNOWN_KEYS {
-                    // `match_key` fails identically for a key that differs
-                    // and for one the input ended in the middle of, so
-                    // reaching here is not yet evidence of a schema mismatch.
-                    // Walking the key to its closing quote is what tells the
-                    // two apart, and it reports the truncation itself.
-                    let key = self.idx;
-                    self.skip_string_body()?;
-                    // Back to the first byte of the key, so the position this
-                    // error carries names what was not recognized.
-                    self.idx = key;
-                    return Err(ErrorCode::UnknownKey);
+                    return self.unknown_key().map(|()| 0);
                 }
                 self.skip_unknown_member()?;
             }
 
             if !self.comma_or_close(b'}')? {
-                self.leave();
-                return self.require_fields::<T>(seen, open);
+                return Ok(seen);
             }
         }
     }
@@ -452,13 +532,17 @@ impl<'de, O: Options> Parser<'de, O> {
         }
     }
 
-    /// The half [`Self::read_enum`]'s two arms share: hash the name at the
-    /// cursor, hand the candidate to `take`, and report a name nothing claimed
-    /// against the name itself.
+    /// The half [`Self::read_enum`]'s two arms share, and
+    /// [`Self::read_internally_tagged`] with them: hash the name at the cursor,
+    /// hand the candidate to `take`, and report a name nothing claimed against
+    /// the name itself.
+    ///
+    /// Bounded on [`Variants`] rather than on [`ReadEnum`], which is all the
+    /// body needs and is what lets the internally tagged reader share it.
     #[inline]
     fn dispatch_variant<T, F>(&mut self, value: &mut T, take: F) -> PResult<()>
     where
-        T: ReadEnum<'de>,
+        T: Variants,
         F: FnOnce(&mut T, usize, &mut Self) -> PResult<bool>,
     {
         let map = T::MAP;
@@ -481,6 +565,73 @@ impl<'de, O: Options> Parser<'de, O> {
         // carries names what was not recognized.
         self.idx = at;
         Err(ErrorCode::UnknownVariant)
+    }
+
+    /// Read a JSON object into a type declared with a tag clause:
+    /// `tagged_enum!(.. as tag "..")`.
+    ///
+    /// One form rather than [`read_enum`](Self::read_enum)'s two: an object
+    /// whose first member is the tag naming the variant, and whose remaining
+    /// members are that variant's own fields.
+    ///
+    /// **The tag has to come first.** This crate reads in one pass, and a tag
+    /// arriving after the members it gives meaning to could only be used by
+    /// holding the object somewhere or by walking it twice. An object that
+    /// begins with any other key is [`ErrorCode::ExpectedTag`], reported
+    /// against that key, rather than searched for a tag further in.
+    ///
+    /// A tag that is first and names no variant is
+    /// [`ErrorCode::UnknownVariant`] under every policy, for the reason
+    /// [`read_enum`](Self::read_enum) gives.
+    pub fn read_internally_tagged<T: ReadInternallyTagged<'de>>(
+        &mut self,
+        value: &mut T,
+    ) -> PResult<()> {
+        self.skip_ws();
+        // Where the object begins, so a payload missing a required member is
+        // reported against the object, as it is for a struct.
+        let open = self.idx;
+        self.expect(b'{', ErrorCode::ExpectedBrace)?;
+        self.enter()?;
+        self.skip_ws();
+
+        // No members at all: there is no tag, and so no variant. Reported
+        // against the object, there being no member to point at.
+        if self.peek() == Some(b'}') {
+            self.idx = open;
+            return Err(ErrorCode::ExpectedTag);
+        }
+
+        // Where the first member's key begins, which is what a tag that is not
+        // here is reported against.
+        let first = self.idx;
+        self.expect(b'"', ErrorCode::ExpectedQuote)?;
+        if !self.match_key(T::TAG) {
+            // `match_key` fails identically for a key that differs and for one
+            // the input ended in the middle of, so walk it first: a document
+            // that ended is not a document that put its tag in the wrong
+            // place, and the two must not be reported alike.
+            self.skip_string_body()?;
+            self.idx = first;
+            return Err(ErrorCode::ExpectedTag);
+        }
+        self.colon()?;
+        // The tag's value names the variant, so it is a string or it is
+        // nothing this can dispatch on. Reported against the whole member: the
+        // key was right and the value under it was not a name.
+        match self.peek() {
+            Some(b'"') => self.idx += 1,
+            Some(_) => {
+                self.idx = first;
+                return Err(ErrorCode::ExpectedTag);
+            }
+            None => return Err(ErrorCode::UnexpectedEnd),
+        }
+
+        // From here the generated arm owns the rest of the object, closing
+        // brace included, because only it knows the payload's type. The
+        // lookup, and a name nothing claims, are `read_enum`'s exactly.
+        self.dispatch_variant(value, |v, i, p| T::read_variant(v, i, p, open))
     }
 
     /// Read a JSON array into a type declared with `array!`.

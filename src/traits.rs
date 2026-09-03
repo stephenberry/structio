@@ -254,3 +254,54 @@ impl_tuple_elements!(12; A, B, C, D, E, F, G, H, I, J, K, L);
 /// type whose memory is already a payload can reach the same two paths, which
 /// is what [`NumericBytes`](crate::beve::NumericBytes) is implementable for.
 pub struct Same;
+
+/// Refuse an internally tagged declaration whose tag is also a field of the
+/// variant's payload.
+///
+/// The two share one object, so a collision writes the name twice:
+/// `{"kind":"Config","kind":"debug"}`. This crate reads that back, taking the
+/// first member as the tag, and a last-wins parser does not: it resolves the
+/// name to the payload's value and the variant is gone. The field is
+/// unreadable here as well, the tag having been consumed before the payload's
+/// members are reached, so the configuration is dead in both directions rather
+/// than merely unwise.
+///
+/// `ctor` is never called. A tuple variant's constructor is a value of type
+/// `fn(P) -> E`, so naming it is what tells this function what `P` is: the
+/// payload's type is deliberately absent from the declaration, and the
+/// constructor is the one place the macro can reach it without asking for it
+/// twice. `tag` is an ordinary argument rather than an associated constant
+/// because the call sites are const contexts holding the literal, which is
+/// what keeps this free of any trait the enum would have to implement.
+///
+/// [`tagged_enum!`](crate::tagged_enum) calls it, for a declaration carrying a
+/// tag clause, from an item-level `const`, so with no generics it is evaluated
+/// by `cargo check`. A generic one has no keys until it is instantiated, and
+/// is checked from the write path's own `const` block instead, which is
+/// [`Keys::REQUIRED`]'s tier: reported when the crate is built.
+///
+/// Comparing bytes rather than `==`, `str` equality not being callable in a
+/// const context on this crate's minimum compiler.
+pub const fn assert_tag_not_a_field<P: Keys, E>(tag: &str, _ctor: fn(P) -> E) {
+    let keys = <P as Keys>::KEYS;
+    let tag = tag.as_bytes();
+    let mut i = 0;
+    while i < keys.len() {
+        let key = keys[i].as_bytes();
+        if key.len() == tag.len() {
+            let mut j = 0;
+            while j < key.len() && key[j] == tag[j] {
+                j += 1;
+            }
+            if j == key.len() {
+                ::core::panic!(
+                    "structio: the tag of an internally tagged enum is also a field of this \
+                     variant's payload. The two share one object, so the name would be written \
+                     twice and a last-wins parser would keep the field and lose the variant. \
+                     Rename the field, or choose another tag."
+                );
+            }
+        }
+        i += 1;
+    }
+}

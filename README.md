@@ -77,7 +77,7 @@ Reach for structio when one of these matters more:
 - **One schema, both formats.** The field list and its hash table are declared once and shared; only the bytes differ.
 - **Objects or arrays.** `object!` declares a struct by key, `array!` by position, for types like a coordinate whose field names carry nothing.
 - **Required members, one at a time.** A field marked `#[required]` has to be in the document; the rest keep their defaults when it is quiet. Mixed schemas are most schemas, so this is the type's business rather than a reader policy.
-- **Enums by name, not by index.** `unit_enum!` writes a variant as its name; `tagged_enum!` writes one carrying a value as a one-member object keyed by that name. Adding or reordering variants does not change what a document already means.
+- **Enums by name, not by index.** `unit_enum!` writes a variant as its name; `tagged_enum!` writes one carrying a value as a one-member object keyed by that name; `tagged_enum!(.. as tag "kind")` puts that name inside the payload's object instead, the convention most JSON APIs use. Adding or reordering variants does not change what a document already means.
 - **Keys are hashed at compile time.** The macro picks the cheapest perfect hash that fits your key set, from a single byte comparison up to a full key hash.
 - **Reads reuse what you already own.** Parsing into an existing value refills its buffers instead of reallocating them, so a loop over records of the same shape settles into no allocation at all.
 - **One field out of a BEVE document.** `from_beve_at(&bytes, "/servers/1/port")` walks the headers in front of the value and decodes nothing else, and `validate_beve` checks a document is well formed without decoding any of it.

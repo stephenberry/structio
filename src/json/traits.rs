@@ -270,6 +270,50 @@ pub trait ReadEnum<'de>: Variants + Sized {
     fn read_payload<O: Options>(&mut self, index: usize, p: &mut Parser<'de, O>) -> PResult<bool>;
 }
 
+/// Variant-by-variant reading for an internally tagged enum.
+///
+/// The counterpart of [`ReadEnum`] for a type declared with
+/// [`tagged_enum!`](crate::tagged_enum)`(.. as tag "..")`. There is one method
+/// rather than two because there is one wire form: an object whose first
+/// member is the tag, and whose remaining members are the variant's own.
+///
+/// [`Parser::read_internally_tagged`] has already matched the tag and is
+/// sitting on the first byte of its value, so what reaches
+/// [`read_variant`](Self::read_variant) is the variant name and the rest of an
+/// object still to be read.
+pub trait ReadInternallyTagged<'de>: Variants + Sized {
+    /// The key that carries the variant name, and which every document must
+    /// put first.
+    const TAG: &'static str;
+
+    /// Take variant `index`, the cursor sitting on the first byte of the tag's
+    /// value (inside its opening quote).
+    ///
+    /// The implementation consumes the name, then the rest of the enclosing
+    /// object including its closing brace, through
+    /// [`Parser::read_object_rest`] for a variant carrying a value and
+    /// [`Parser::finish_internally_tagged`] for one carrying nothing.
+    ///
+    /// Returns `false` if the name did not match, leaving the cursor
+    /// untouched, which the caller reports as
+    /// [`ErrorCode::UnknownVariant`](crate::ErrorCode::UnknownVariant).
+    /// `index` is only the candidate the hash proposed, exactly as in
+    /// [`ReadEnum`], so an implementation must confirm the name with
+    /// [`Parser::match_key`] before doing anything else.
+    ///
+    /// `open` is the offset of the object's opening brace. It exists because a
+    /// [`MissingKey`](crate::ErrorCode::MissingKey) names the object it is
+    /// missing from, and by this point the cursor is well past it; pass it on
+    /// to [`Parser::read_object_rest`], which is what an implementation
+    /// carrying a payload calls.
+    fn read_variant<O: Options>(
+        &mut self,
+        index: usize,
+        p: &mut Parser<'de, O>,
+        open: usize,
+    ) -> PResult<bool>;
+}
+
 /// Convenience bound for generic containers: readable from any JSON input, and
 /// writable.
 ///

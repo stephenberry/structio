@@ -4,6 +4,20 @@ Notable changes to structio. The format follows [Keep a Changelog](https://keepa
 
 Before 1.0 the API is not frozen: a minor bump may break it, and what broke is listed here.
 
+## [Unreleased]
+
+### Added
+
+- **Internal tagging**, a second convention for `tagged_enum!`, asked for with a tag clause: `tagged_enum!(Shape as tag "kind" { .. })`. The variant name goes inside the payload's object as a member rather than wrapping it, giving `{"kind":"Circle","radius":1}` where the clause-free form writes `{"Circle":{"radius":1}}`. This is what most JSON APIs use, and the only form here that a C++ Glaze `std::variant` can be made to agree with, external tagging having nowhere to put the payload's own keys. The clause works on `json_tagged_enum!` and `beve_tagged_enum!` too.
+
+  **The tag has to be the object's first member**, and a document that puts it elsewhere is the new `ErrorCode::ExpectedTag`, reported against the offending key. Reading is one pass with no lookahead, so a tag arriving after the members it gives meaning to could only be used by holding the object or walking it twice. Writing always emits the tag first, so this crate's own output round-trips unconditionally, as does any producer that emits its tag first — the conventional ordering. The refusal is loud and positioned rather than a misparse.
+
+  A payload must be an object (a compile error naming `WriteObject` otherwise), since its members share the object with the tag. Everything else carries over: renaming, case rules, generics, borrowed payloads, reading into an existing value, and the policies. The result is an ordinary object, so pointers, validation and transcoding walk it with no knowledge of enums at all.
+
+- `Parser::read_object_rest` and `Parser::finish_internally_tagged`, their `Reader` counterparts, and `Writer::write_internally_tagged` in both formats, for hand-written impls of the two new `ReadInternallyTagged` traits. A variant carrying nothing writes through the existing `write_tagged`, the bytes being the same object of one member.
+
+- A tag that is also a field of a variant's payload is a **compile error**. The two share one object, so it would write the name twice; structio reads that back and a last-wins parser does not, keeping the field and losing the variant. The comparison is of wire names, so a collision that only appears after a case rule is caught too. `cargo check` refuses a declaration with no generics; a generic one is refused when the crate is built, a generic payload having no keys until it is instantiated.
+
 ## [0.2.2] - 2026-09-02
 
 ### Changed

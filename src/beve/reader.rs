@@ -44,7 +44,7 @@ use core::marker::PhantomData;
 
 use crate::beve::header::{self, byte_width, decode_size};
 use crate::beve::impls::{Block, NumericBytes};
-use crate::beve::traits::{Read, ReadArray, ReadAs, ReadEnum, ReadObject};
+use crate::beve::traits::{Read, ReadArray, ReadAs, ReadEnum, ReadInternallyTagged, ReadObject};
 use crate::error::{ErrorCode, PResult};
 use crate::options::{Options, Standard};
 use crate::traits::Fields;
@@ -321,8 +321,24 @@ impl<'de, O: Options> Reader<'de, O> {
         }
     }
 
+    /// Leave a container [`enter`](Self::enter) counted.
+    ///
+    /// The two are balanced by the caller, and the public
+    /// `read_object_rest` / `finish_internally_tagged` pair takes its `enter`
+    /// from whoever opened the object. A hand-written impl that calls one of
+    /// those without having entered wraps the depth, and what that costs
+    /// depends on how often it happens: once, the next `enter` wraps it back
+    /// and the parse allows one extra level; repeatedly, the limit refuses
+    /// input it should have taken. It stops counting altogether only when a
+    /// stray `leave` cancels an `enter` at every level of a recursion, and
+    /// then a hostile document has no depth limit at all. A debug build says
+    /// so rather than leaving any of that to be discovered.
     #[inline(always)]
     pub(crate) fn leave(&mut self) {
+        debug_assert!(
+            self.depth > 0,
+            "structio: `leave` without a matching `enter`, which would disable the nesting limit"
+        );
         self.depth -= 1;
     }
 
@@ -677,14 +693,34 @@ impl<'de, O: Options> Reader<'de, O> {
         }
         let members = self.count()?;
         self.enter()?;
+        self.read_object_rest(value, members, open)
+    }
 
+    /// Read `remaining` members into a type declared with `object!`, the
+    /// object's header and any members before them already consumed.
+    ///
+    /// What [`Self::read_internally_tagged`] leaves behind: the tag has been
+    /// taken, and the rest of the object is the variant's payload. It is also
+    /// [`Self::read_object`]'s own body, an object with nothing taken from it
+    /// yet being the case where `remaining` is all of it.
+    ///
+    /// `open` is the offset of the object's header byte, carried in because a
+    /// [`MissingKey`](ErrorCode::MissingKey) is reported against the object
+    /// rather than against what follows it, and this is called once the cursor
+    /// is past it. The `enter` is the caller's, and is balanced here.
+    pub fn read_object_rest<T: ReadObject<'de>>(
+        &mut self,
+        value: &mut T,
+        remaining: usize,
+        open: usize,
+    ) -> PResult<()> {
         let map = T::MAP;
         let fields = map.n as usize;
         // One bit per field filled, compared once the object ends against the
         // fields that had to be there. Never written, and so never read, unless
         // the policy or the type asks for one.
         let mut seen = 0u64;
-        for _ in 0..members {
+        for _ in 0..remaining {
             let n = self.count()?;
             // Where the key's bytes begin, so a refusal can point at them
             // rather than at the value they introduced. Dead, and gone, under
@@ -716,6 +752,27 @@ impl<'de, O: Options> Reader<'de, O> {
             self.error_key = Fields::<O, T>::missing(seen);
             return Err(ErrorCode::MissingKey);
         }
+        Ok(())
+    }
+
+    /// Consume `remaining` members of an object with no fields to fill: the
+    /// form an internally tagged variant carrying nothing takes.
+    ///
+    /// The tag was the whole value, so anything after it is an unknown member
+    /// and meets the policy that governs one. The `enter` is the caller's, and
+    /// is balanced here.
+    pub fn finish_internally_tagged(&mut self, remaining: usize) -> PResult<()> {
+        for _ in 0..remaining {
+            let n = self.count()?;
+            let at = self.pos;
+            self.take(n)?;
+            if O::ERROR_ON_UNKNOWN_KEYS {
+                self.pos = at;
+                return Err(ErrorCode::UnknownKey);
+            }
+            self.skip_value()?;
+        }
+        self.leave();
         Ok(())
     }
 
@@ -778,6 +835,72 @@ impl<'de, O: Options> Reader<'de, O> {
                 Err(ErrorCode::ExpectedVariant)
             }
         }
+    }
+
+    /// Read a BEVE object into a type declared with a tag clause:
+    /// `tagged_enum!(.. as tag "..")`.
+    ///
+    /// The mirror of
+    /// [`json::Parser::read_internally_tagged`](crate::json::Parser::read_internally_tagged),
+    /// and it holds to the same rule: **the tag has to be the object's first
+    /// member.** An object beginning with any other key is
+    /// [`ErrorCode::ExpectedTag`] rather than searched, because searching
+    /// means a second pass this crate does not take.
+    ///
+    /// A tag that is first and names no variant is
+    /// [`ErrorCode::UnknownVariant`] under every policy, for the reason
+    /// [`Self::read_enum`] gives.
+    pub fn read_internally_tagged<T: ReadInternallyTagged<'de>>(
+        &mut self,
+        value: &mut T,
+    ) -> PResult<()> {
+        // Where the object begins, so a payload missing a required member is
+        // reported against the object, as it is for a struct.
+        let open = self.pos;
+        let h = self.head()?;
+        if header::ty(h) != header::TY_OBJECT {
+            return Err(ErrorCode::ExpectedObject);
+        }
+        if header::sub(h) != header::CAT_FLOAT {
+            // Integer keys, which no enum has: its tag is a name.
+            return Err(ErrorCode::UnsupportedKeyType);
+        }
+        let members = self.count()?;
+        // No members at all: no tag, and so no variant.
+        if members == 0 {
+            self.pos = open;
+            return Err(ErrorCode::ExpectedTag);
+        }
+        self.enter()?;
+
+        // Where the first member's key begins, which is what a tag that is not
+        // here is reported against.
+        let first = self.pos;
+        let n = self.count()?;
+        if self.take(n)? != T::TAG.as_bytes() {
+            self.pos = first;
+            return Err(ErrorCode::ExpectedTag);
+        }
+        // The tag's value names the variant, so it is a string or it is
+        // nothing this can dispatch on.
+        let at = self.pos;
+        let vh = self.head()?;
+        if header::ty(vh) != header::TY_STRING {
+            self.pos = first;
+            return Err(ErrorCode::ExpectedTag);
+        }
+        let name = self.str_body()?.as_bytes();
+
+        // From here the generated arm owns the object's remaining members,
+        // because only it knows the payload's type.
+        let index = T::MAP.lookup_sized(T::VARIANTS, name);
+        if index >= T::MAP.n as usize
+            || !T::read_variant(value, index, name, self, members - 1, open)?
+        {
+            self.pos = at;
+            return Err(ErrorCode::UnknownVariant);
+        }
+        Ok(())
     }
 
     /// Drive a BEVE object as a map, calling `entry` with each key.

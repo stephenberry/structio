@@ -81,6 +81,26 @@ pub enum ErrorCode {
     /// key of an object. Anything else, an object with no members or with two,
     /// a number, an array, is not a variant at all.
     ExpectedVariant,
+    /// An internally tagged enum's object did not begin with its tag.
+    ///
+    /// An internally tagged enum, declared
+    /// [`tagged_enum!`](crate::tagged_enum)`(.. as tag "..")`, reads in one
+    /// pass, so the member deciding which variant this is has to arrive before
+    /// the members whose meaning it decides. An object whose first member is
+    /// some other key is refused here rather than searched: finding a later tag
+    /// would mean holding the object somewhere or walking it twice, and this
+    /// crate does neither.
+    ///
+    /// The same code covers an object with no members at all, and a tag whose
+    /// value is not a string. Which of the three it was is not distinguished,
+    /// because distinguishing them is the search being refused. The reported
+    /// position is the object's first member, or the object itself when it has
+    /// none.
+    ///
+    /// A tag that *is* first and names nothing is
+    /// [`UnknownVariant`](Self::UnknownVariant): the tag was found, and its
+    /// value is not a variant.
+    ExpectedTag,
 
     // Values
     NumberOutOfRange,
@@ -179,6 +199,7 @@ impl ErrorCode {
             ExpectedComplex => "expected a complex number",
             ExpectedMatrix => "expected a matrix",
             ExpectedVariant => "expected an enum variant",
+            ExpectedTag => "expected the tag as the object's first member",
             NumberOutOfRange => "number out of range for target type",
             InvalidNumber => "invalid number",
             ExpectedNumber => "expected a number",

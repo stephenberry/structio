@@ -743,6 +743,33 @@ impl<'a, O: Options> Writer<'a, O> {
         self.close(b'}');
     }
 
+    /// Write an internally tagged variant carrying a value:
+    /// `{"tag":"Name",...}`, the payload's own members following the tag.
+    ///
+    /// `prefix` is the pre-quoted tag key with its colon and `name` the
+    /// variant's name, both built at compile time by the macro. The tag is
+    /// written first because that is where the reader requires it: this crate
+    /// reads in one pass, so a tag after the members it describes could not be
+    /// used without a second look at them.
+    ///
+    /// [`Options::SKIP_NULL`] reaches the payload's members, which is what it
+    /// means everywhere else, but not the tag: dropping that would leave an
+    /// object naming no variant.
+    #[inline]
+    pub fn write_internally_tagged<T: WriteObject + ?Sized>(
+        &mut self,
+        prefix: &str,
+        name: &str,
+        value: &T,
+    ) {
+        self.open(b'{');
+        self.key(prefix);
+        self.write_str(name);
+        self.push(b',');
+        value.write_fields(self);
+        self.close(b'}');
+    }
+
     /// Write a struct as a JSON array.
     ///
     /// The bracket counterpart of [`Self::write_object`], down to the trailing

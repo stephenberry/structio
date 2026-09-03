@@ -1360,6 +1360,109 @@ macro_rules! __beve_array_body {
 /// writes an object. Reading is unaffected either way: a sequence of enums
 /// takes a string array or a generic one however it was written.
 ///
+/// # Internal tagging
+///
+/// `as tag "kind"` puts the variant name inside the payload's object rather
+/// than in a key wrapping it:
+///
+/// | The variant | No tag clause | `as tag "kind"` |
+/// |---|---|---|
+/// | Carries nothing | `"Empty"` | `{"kind":"Empty"}` |
+/// | Carries a value | `{"Circle":{"radius":1}}` | `{"kind":"Circle","radius":1}` |
+///
+/// ```
+/// # #[derive(Default, PartialEq, Debug)]
+/// # struct Circle { r: f64 }
+/// # structio::object!(Circle { r });
+/// # #[derive(Default, PartialEq, Debug)]
+/// # enum Shape { #[default] Empty, Circle(Circle) }
+/// structio::tagged_enum!(Shape as tag "kind" { Empty, Circle(_) });
+/// assert_eq!(structio::to_string(&Shape::Circle(Circle { r: 1.0 })), r#"{"kind":"Circle","r":1}"#);
+/// assert_eq!(structio::to_string(&Shape::Empty), r#"{"kind":"Empty"}"#);
+/// ```
+///
+/// This is the shape most JSON APIs settled on, and the one a C++ Glaze
+/// `std::variant` with a declared tag produces. It is the only form here that
+/// a deduced variant can be made to agree with, external tagging having no
+/// place to put the payload's own keys.
+///
+/// The clause goes after the type and after a [case rule](crate::case), which
+/// applies to the variant names as it does elsewhere. The tag key itself is a
+/// literal and is never converted. A per-variant name literal
+/// (`"read" => ReadFile(_)`) and generics work as they do without the clause.
+///
+/// ```
+/// # #[derive(Default, PartialEq, Debug)]
+/// # struct Read { path: String }
+/// # structio::object!(Read { path });
+/// # #[derive(Default, PartialEq, Debug)]
+/// # enum Op { #[default] Noop, ReadFile(Read) }
+/// structio::tagged_enum!(Op as "kebab-case" tag "op" { Noop, ReadFile(_) });
+/// # assert_eq!(structio::to_string(&Op::Noop), r#"{"op":"noop"}"#);
+/// ```
+///
+/// ## The tag has to come first
+///
+/// **A document whose object begins with any other key is
+/// [`ExpectedTag`](crate::ErrorCode::ExpectedTag).** This crate reads in one
+/// pass with no lookahead and no buffering, so the member that decides which
+/// variant is being read has to arrive before the members whose meaning it
+/// decides. Finding a tag further in means holding the object somewhere or
+/// walking it twice, and neither is a thing this crate does.
+///
+/// The restriction is on *reading*. Writing always puts the tag first, so a
+/// value written by this crate reads back unconditionally, and so does one
+/// from any producer that emits its tag first, which is the conventional
+/// ordering and what a declaration-ordered serializer does by default. A
+/// producer that puts it last is refused, loudly and with the offending key's
+/// position, rather than misread.
+///
+/// ```
+/// # #[derive(Default, PartialEq, Debug)]
+/// # struct Circle { r: f64 }
+/// # structio::object!(Circle { r });
+/// # #[derive(Default, PartialEq, Debug)]
+/// # enum Shape { #[default] Empty, Circle(Circle) }
+/// # structio::tagged_enum!(Shape as tag "kind" { Empty, Circle(_) });
+/// use structio::{ErrorCode, from_str};
+///
+/// assert_eq!(
+///     from_str::<Shape>(r#"{"kind":"Circle","r":1}"#).unwrap(),
+///     Shape::Circle(Circle { r: 1.0 }),
+/// );
+/// // The same members, the tag last.
+/// assert_eq!(
+///     from_str::<Shape>(r#"{"r":1,"kind":"Circle"}"#).unwrap_err().code,
+///     ErrorCode::ExpectedTag,
+/// );
+/// ```
+///
+/// ## What a payload may be
+///
+/// An object, and nothing else. The variant's members share one object with
+/// the tag, so a payload with no members of its own to share has nowhere to
+/// go: `Sides(u32)` is a compile error naming [`Keys`](crate::Keys), and then
+/// [`WriteObject`](crate::json::WriteObject) and its neighbours, rather than a
+/// runtime surprise. Declare such a variant's payload as a struct, or drop the
+/// tag clause, external tagging taking any payload because it gives it an
+/// object of its own.
+///
+/// A variant carrying nothing is written as the tag alone and reads back from
+/// it. Members beside it meet the reader's policy exactly as an unknown member
+/// of a struct does: refused under [`Standard`](crate::Standard), stepped over
+/// under [`SkipUnknown`](crate::SkipUnknown).
+///
+/// **A tag that is also a payload's field is refused at compile time.** The
+/// two share one object, so a collision would write the name twice
+/// (`{"kind":"Config","kind":"debug"}`), which this crate reads back and a
+/// last-wins parser does not: it keeps the field and loses the variant. The
+/// comparison is of wire names, so it catches a collision that only exists
+/// after a [case rule](crate::case) has been applied.
+///
+/// A declaration with no generics is checked by `cargo check`. A generic one
+/// has no payload keys until it is instantiated, so it is checked when the
+/// crate is built, which is [`Keys::REQUIRED`](crate::Keys::REQUIRED)'s tier.
+///
 /// # What it expands to
 ///
 /// One [`Variants`](crate::Variants) impl carrying the name list and its
@@ -1403,15 +1506,17 @@ macro_rules! unit_enum {
             __both_unit_enum_impls $ty { $($($name =>)? $variant),* }
         );
     };
-    // Anything else, which is overwhelmingly a variant written `Name(_)`.
-    // Without this the failure is `no rules expected `(`` pointed at a matcher
-    // inside this crate, which tells the reader nothing about what to do.
+    // Anything else, which is overwhelmingly a variant written `Name(_)`, and
+    // after that a tag clause. Without this the failure is `no rules expected
+    // `(`` pointed at a matcher inside this crate, which tells the reader
+    // nothing about what to do.
     ($($rest:tt)*) => {
         ::core::compile_error!(
             "`unit_enum!` takes a type and a brace-delimited list of variant \
              names, each optionally renamed with `\"name\" => Variant`. A \
              variant that carries a value, written `Variant(_)`, belongs to \
-             `tagged_enum!` instead."
+             `tagged_enum!` instead, and so does a tag clause: a unit enum's \
+             value is a bare name, with no object for a tag to go in."
         );
     };
 }
@@ -1422,6 +1527,11 @@ macro_rules! unit_enum {
 /// carries a value is written as an object of one member, keyed by that name:
 /// the tagged-union form, with the tag being the name rather than a position,
 /// so adding or reordering variants does not change what a document means.
+///
+/// That is *external* tagging, where the name wraps the payload, and it is
+/// what a declaration with no tag clause gets. Adding `as tag "..."` moves the
+/// name **inside** the payload's object instead, as a member beside the
+/// payload's own; see [Internal tagging](#internal-tagging) below.
 ///
 /// Mark a variant that carries a value with `(_)`. The payload's type is not
 /// repeated here; it is already on the enum, and stating it twice would be a
@@ -1586,37 +1696,86 @@ macro_rules! beve_tagged_enum {
 /// The same normalization of `'de`, and the same two lists handed on. What it
 /// shares across formats is [`Variants`](crate::Variants), the enum's
 /// counterpart of [`Keys`](crate::Keys).
+///
+/// Alongside the case rule travels the **tag slot**: `[]` where the variant
+/// name wraps the payload, `["kind"]` where it goes inside it. Both are
+/// properties of the declaration rather than of either format, and the slot is
+/// what the impl selectors dispatch on, so external and internal tagging share
+/// one grammar and one entry point rather than two of each.
+///
+/// Arm order carries two rules. Within a generics group, the `tag` rules come
+/// first, because `as $case:tt` would otherwise capture the `tag` keyword and
+/// leave the literal stranded. Across groups, every bracketed rule comes before
+/// every bare one, because a bare rule parses `$ty:ty` against a leading `[`
+/// and a failure there is a hard error rather than a fall through to the next
+/// rule: `[const N: usize]` is not a type, and saying so ends the compile.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __declare_enum {
+    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as tag $tag:literal { $($body:tt)* }) => {
+        $crate::__declared_enum!(
+            $m ['de $($gen)*] ['de $($gen)*] [_] [$tag] $ty { $($body)* });
+    };
+    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as $case:tt tag $tag:literal { $($body:tt)* }) => {
+        $crate::__declared_enum!(
+            $m ['de $($gen)*] ['de $($gen)*] [$case] [$tag] $ty { $($body)* });
+    };
     ($m:ident [ 'de $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
-        $crate::__declared_enum!($m ['de $($gen)*] ['de $($gen)*] [$case] $ty { $($body)* });
+        $crate::__declared_enum!($m ['de $($gen)*] ['de $($gen)*] [$case] [] $ty { $($body)* });
     };
     ($m:ident [ 'de $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
-        $crate::__declared_enum!($m ['de $($gen)*] ['de $($gen)*] [_] $ty { $($body)* });
+        $crate::__declared_enum!($m ['de $($gen)*] ['de $($gen)*] [_] [] $ty { $($body)* });
+    };
+    ($m:ident [ $($gen:tt)* ] $ty:ty as tag $tag:literal { $($body:tt)* }) => {
+        $crate::__declared_enum!($m ['de, $($gen)*] [$($gen)*] [_] [$tag] $ty { $($body)* });
+    };
+    ($m:ident [ $($gen:tt)* ] $ty:ty as $case:tt tag $tag:literal { $($body:tt)* }) => {
+        $crate::__declared_enum!(
+            $m ['de, $($gen)*] [$($gen)*] [$case] [$tag] $ty { $($body)* });
     };
     ($m:ident [ $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
-        $crate::__declared_enum!($m ['de, $($gen)*] [$($gen)*] [$case] $ty { $($body)* });
+        $crate::__declared_enum!($m ['de, $($gen)*] [$($gen)*] [$case] [] $ty { $($body)* });
     };
     ($m:ident [ $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
-        $crate::__declared_enum!($m ['de, $($gen)*] [$($gen)*] [_] $ty { $($body)* });
+        $crate::__declared_enum!($m ['de, $($gen)*] [$($gen)*] [_] [] $ty { $($body)* });
+    };
+    ($m:ident $ty:ty as tag $tag:literal { $($body:tt)* }) => {
+        $crate::__declared_enum!($m ['de] [] [_] [$tag] $ty { $($body)* });
+    };
+    ($m:ident $ty:ty as $case:tt tag $tag:literal { $($body:tt)* }) => {
+        $crate::__declared_enum!($m ['de] [] [$case] [$tag] $ty { $($body)* });
     };
     ($m:ident $ty:ty as $case:tt { $($body:tt)* }) => {
-        $crate::__declared_enum!($m ['de] [] [$case] $ty { $($body)* });
+        $crate::__declared_enum!($m ['de] [] [$case] [] $ty { $($body)* });
     };
     ($m:ident $ty:ty { $($body:tt)* }) => {
-        $crate::__declared_enum!($m ['de] [] [_] $ty { $($body)* });
+        $crate::__declared_enum!($m ['de] [] [_] [] $ty { $($body)* });
     };
 }
 
 /// [`__declared!`](crate::__declared) for the enum forms.
+///
+/// Two arms rather than one slot holding an optional literal, because a tag is
+/// not merely carried: where there is one, it also has to be checked against
+/// the payload's own keys, which is what
+/// [`__tag_check!`](crate::__tag_check) is.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __declared_enum {
-    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty { $($body:tt)* }) => {
+    ($m:ident [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [] $ty:ty { $($body:tt)* }) => {
         $crate::__case_check!($case);
         $crate::__variants_impl!([$($wgen)*] [$case] $ty { $($body)* });
-        $crate::$m!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
+        $crate::$m!([$($rgen)*] [$($wgen)*] [$case] [] $ty { $($body)* });
+    };
+    (
+        $m:ident [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty {
+            $($body:tt)*
+        }
+    ) => {
+        $crate::__case_check!($case);
+        $crate::__variants_impl!([$($wgen)*] [$case] $ty { $($body)* });
+        $crate::__tag_check!([$($wgen)*] [$tag] $ty { $($body)* });
+        $crate::$m!([$($rgen)*] [$($wgen)*] [$case] [$tag] $ty { $($body)* });
     };
 }
 
@@ -1625,19 +1784,89 @@ macro_rules! __declared_enum {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __both_unit_enum_impls {
-    ([$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty { $($body:tt)* }) => {
-        $crate::__json_enum_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
+    ([$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [] $ty:ty { $($body:tt)* }) => {
+        $crate::__json_enum_impls!([$($rgen)*] [$($wgen)*] [$case] [] $ty { $($body)* });
         $crate::__beve_unit_enum_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
     };
 }
 
 /// Both formats, for [`tagged_enum!`](crate::tagged_enum).
+///
+/// The tag slot passes through untouched: which of the two tagging conventions
+/// a declaration asked for is settled once, in each format's own selector,
+/// rather than here and there both.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __both_enum_impls {
-    ([$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty { $($body:tt)* }) => {
-        $crate::__json_enum_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
-        $crate::__beve_enum_impls!([$($rgen)*] [$($wgen)*] [$case] $ty { $($body)* });
+    ([$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$($tag:literal)?] $ty:ty { $($body:tt)* }) => {
+        $crate::__json_enum_impls!([$($rgen)*] [$($wgen)*] [$case] [$($tag)?] $ty { $($body)* });
+        $crate::__beve_enum_impls!([$($rgen)*] [$($wgen)*] [$case] [$($tag)?] $ty { $($body)* });
+    };
+}
+
+/// Refuse a tag that is also a field of some variant's payload, at the
+/// earliest point the payload's keys are known.
+///
+/// For a declaration with no generics that point is here, in an item-level
+/// `const` whose value is monomorphic and so is evaluated during `cargo
+/// check`. A generic declaration has no keys until it is instantiated, so this
+/// expands to nothing and the write path's `const` block carries the check
+/// instead; see [`__tag_check_generic!`](crate::__tag_check_generic). Exactly
+/// one of the two is live per declaration, so nothing is checked twice.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tag_check {
+    (
+        [] [$tag:literal] $ty:ty {
+            $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
+        }
+    ) => {
+        $( $crate::__tag_check_one!([$tag] $ty, $variant $(($($payload)*))?); )*
+    };
+    ([$($wgen:tt)+] [$tag:literal] $ty:ty { $($body:tt)* }) => {};
+}
+
+/// One variant's share of [`__tag_check!`](crate::__tag_check).
+///
+/// The payload's type is named through the variant's constructor, which is a
+/// value of type `fn(P) -> Self`. That is what makes the check possible at all
+/// without the declaration repeating a type it already gave the enum.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tag_check_one {
+    // Carries nothing, so it shares its object with no members and has nothing
+    // the tag could collide with.
+    ([$tag:literal] $ty:ty, $variant:ident) => {};
+    ([$tag:literal] $ty:ty, $variant:ident ($($payload:tt)*)) => {
+        const _: () = $crate::assert_tag_not_a_field($tag, <$ty>::$variant);
+    };
+}
+
+/// [`__tag_check!`](crate::__tag_check) for a generic declaration, whose
+/// payload keys exist only once instantiated.
+///
+/// Expands to nothing when there are no generics, the item-level check having
+/// already covered that case.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tag_check_generic {
+    ([] [$tag:literal] { $($body:tt)* }) => {};
+    (
+        [$($wgen:tt)+] [$tag:literal] {
+            $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
+        }
+    ) => {
+        $( $crate::__tag_check_generic_one!([$tag] $variant $(($($payload)*))?); )*
+    };
+}
+
+/// One variant's share of [`__tag_check_generic!`](crate::__tag_check_generic).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tag_check_generic_one {
+    ([$tag:literal] $variant:ident) => {};
+    ([$tag:literal] $variant:ident ($($payload:tt)*)) => {
+        $crate::assert_tag_not_a_field($tag, Self::$variant);
     };
 }
 
@@ -1690,11 +1919,21 @@ macro_rules! __variants_impl {
     };
 }
 
+/// The JSON impls for [`tagged_enum!`](crate::tagged_enum), of whichever
+/// tagging convention the declaration's tag slot named.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __json_enum_impls {
+    // A tag key: the name goes inside the payload's object, and the impls are
+    // a different set rather than a variation on these.
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty { $($body:tt)* }
+    ) => {
+        $crate::__json_internal_enum_impls!(
+            [$($rgen)*] [$($wgen)*] [$case] [$tag] $ty { $($body)* });
+    };
+    (
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         }
     ) => {
@@ -1863,6 +2102,266 @@ macro_rules! __json_read_payload {
     };
 }
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __json_internal_enum_impls {
+    (
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty {
+            $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
+        }
+    ) => {
+        impl<$($rgen)*> $crate::json::ReadInternallyTagged<'de> for $ty {
+            const TAG: &'static str = $tag;
+
+            // Deliberately not `inline(always)`, for `read_field`'s reason:
+            // this body holds an arm for every variant.
+            #[inline]
+            #[allow(unused_assignments, unused_variables, unused_mut, unreachable_patterns)]
+            fn read_variant<O: $crate::Options>(
+                &mut self,
+                index: usize,
+                p: &mut $crate::json::Parser<'de, O>,
+                open: usize,
+            ) -> ::core::result::Result<bool, $crate::ErrorCode> {
+                // The same const-folding counter `read_field` uses, and for the
+                // same reason: expansion stays linear in the variant count.
+                let mut i = 0usize;
+                $(
+                    if index == i {
+                        return $crate::__json_read_internal!(
+                            self, p, open,
+                            $crate::__json_key!([$case] $($name)? [$variant]),
+                            $variant $(($($payload)*))?
+                        );
+                    }
+                    i += 1;
+                )*
+                ::core::result::Result::Ok(false)
+            }
+        }
+
+        impl<$($rgen)*> $crate::json::Read<'de> for $ty {
+            #[inline]
+            fn read<O: $crate::Options>(
+                &mut self,
+                p: &mut $crate::json::Parser<'de, O>,
+            ) -> ::core::result::Result<(), $crate::ErrorCode> {
+                p.read_internally_tagged(self)
+            }
+        }
+
+        impl<$($wgen)*> $crate::json::Write for $ty {
+            #[inline]
+            #[allow(irrefutable_let_patterns)]
+            fn write<O: $crate::Options>(&self, w: &mut $crate::json::Writer<'_, O>) {
+                // Named for `__json_enum_impls`'s reason: this is the only
+                // place writing evaluates the map, and so the only place a
+                // generic declaration's duplicate names are caught. The tag
+                // check rides along for the same reason, a generic payload
+                // having no keys until it is instantiated.
+                const {
+                    let _ = <Self as $crate::Variants>::MAP;
+                    $crate::__tag_check_generic!([$($wgen)*] [$tag] {
+                        $($($name =>)? $variant $(($($payload)*))?),*
+                    });
+                };
+                $(
+                    $crate::__write_internal_variant!(
+                        self, w,
+                        $crate::__json_key!([$case] $($name)? [$variant]),
+                        // The tag key is a literal and is never case
+                        // converted: it names a member of the document, not a
+                        // variant of the enum. A literal key's prefix comes
+                        // from `concat!`, which is what `__json_member!` exists
+                        // to stand in for where the key is *computed*.
+                        ::core::concat!("\"", $tag, "\":"),
+                        $variant $(($($payload)*))?
+                    );
+                )*
+                // Every variant returned above, which is what makes extending
+                // the enum without extending the declaration a build error.
+                match self { $( Self::$variant { .. } => {} ),* }
+            }
+        }
+    };
+}
+
+/// One arm of the JSON `read_variant`.
+///
+/// The cursor sits inside the tag value's opening quote, so the name is
+/// matched exactly as [`__json_read_name!`](crate::__json_read_name) matches
+/// one. What differs is what follows: the rest of the enclosing object, which
+/// belongs to the payload.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __json_read_internal {
+    // Carries nothing, so the tag was the object's whole content. Members
+    // beside it are unknown ones and meet the policy that governs those.
+    ($self:ident, $p:ident, $open:ident, $name:expr, $variant:ident) => {
+        if $p.match_key($name) {
+            // Assigned after the object is consumed, not before, so a read
+            // that fails on a member beside the tag leaves the destination
+            // holding what it held.
+            $p.finish_internally_tagged()?;
+            *$self = Self::$variant;
+            ::core::result::Result::Ok(true)
+        } else {
+            ::core::result::Result::Ok(false)
+        }
+    };
+    // Carries a value, whose members share the object with the tag.
+    ($self:ident, $p:ident, $open:ident, $name:expr, $variant:ident ($($payload:tt)*)) => {
+        if $p.match_key($name) {
+            // Reading into what is already there, for
+            // `__json_read_payload!`'s reason.
+            match $self {
+                Self::$variant(v) => {
+                    $p.read_object_rest(v, $open)?;
+                }
+                _ => {
+                    let mut value = ::core::default::Default::default();
+                    $p.read_object_rest(&mut value, $open)?;
+                    *$self = Self::$variant(value);
+                }
+            }
+            ::core::result::Result::Ok(true)
+        } else {
+            ::core::result::Result::Ok(false)
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __beve_internal_enum_impls {
+    (
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty {
+            $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
+        }
+    ) => {
+        impl<$($rgen)*> $crate::beve::ReadInternallyTagged<'de> for $ty {
+            const TAG: &'static str = $tag;
+
+            #[inline]
+            #[allow(unused_assignments, unused_variables, unused_mut, unreachable_patterns)]
+            fn read_variant<O: $crate::Options>(
+                &mut self,
+                index: usize,
+                name: &[u8],
+                r: &mut $crate::beve::Reader<'de, O>,
+                remaining: usize,
+                open: usize,
+            ) -> ::core::result::Result<bool, $crate::ErrorCode> {
+                let mut i = 0usize;
+                $(
+                    if index == i {
+                        return $crate::__beve_read_internal!(
+                            self, name, r, remaining, open,
+                            $crate::__json_key!([$case] $($name)? [$variant]),
+                            $variant $(($($payload)*))?
+                        );
+                    }
+                    i += 1;
+                )*
+                ::core::result::Result::Ok(false)
+            }
+        }
+
+        impl<$($rgen)*> $crate::beve::Read<'de> for $ty {
+            #[inline]
+            fn read<O: $crate::Options>(
+                &mut self,
+                r: &mut $crate::beve::Reader<'de, O>,
+            ) -> ::core::result::Result<(), $crate::ErrorCode> {
+                r.read_internally_tagged(self)
+            }
+        }
+
+        impl<$($wgen)*> $crate::beve::Write for $ty {
+            #[inline]
+            #[allow(irrefutable_let_patterns)]
+            fn write<O: $crate::Options>(&self, w: &mut $crate::beve::Writer<'_, O>) {
+                const {
+                    let _ = <Self as $crate::Variants>::MAP;
+                    $crate::__tag_check_generic!([$($wgen)*] [$tag] {
+                        $($($name =>)? $variant $(($($payload)*))?),*
+                    });
+                };
+                $(
+                    $crate::__write_internal_variant!(
+                        self, w,
+                        $crate::__json_key!([$case] $($name)? [$variant]),
+                        $crate::__beve_key_bytes!($tag),
+                        $variant $(($($payload)*))?
+                    );
+                )*
+                match self { $( Self::$variant { .. } => {} ),* }
+            }
+        }
+    };
+}
+
+/// One arm of the BEVE `read_variant`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __beve_read_internal {
+    ($self:ident, $key:ident, $r:ident, $remaining:ident, $open:ident, $name:expr, $variant:ident) => {
+        if $key == $name.as_bytes() {
+            // Assigned after the object is consumed, for the JSON arm's reason.
+            $r.finish_internally_tagged($remaining)?;
+            *$self = Self::$variant;
+            ::core::result::Result::Ok(true)
+        } else {
+            ::core::result::Result::Ok(false)
+        }
+    };
+    (
+        $self:ident, $key:ident, $r:ident, $remaining:ident, $open:ident, $name:expr,
+        $variant:ident ($($payload:tt)*)
+    ) => {
+        if $key == $name.as_bytes() {
+            match $self {
+                Self::$variant(v) => {
+                    $r.read_object_rest(v, $remaining, $open)?;
+                }
+                _ => {
+                    let mut value = ::core::default::Default::default();
+                    $r.read_object_rest(&mut value, $remaining, $open)?;
+                    *$self = Self::$variant(value);
+                }
+            }
+            ::core::result::Result::Ok(true)
+        } else {
+            ::core::result::Result::Ok(false)
+        }
+    };
+}
+
+/// One arm of an internally tagged `write`, in either format.
+///
+/// [`__write_variant!`](crate::__write_variant)'s counterpart, and shared
+/// between the formats for the same reason: the two calls are spelled the same
+/// in both, and only the pre-encoded tag key differs.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __write_internal_variant {
+    ($self:ident, $w:ident, $name:expr, $tag:expr, $variant:ident) => {
+        if let Self::$variant = $self {
+            // An object of one member whose value is the name, which is
+            // exactly what `write_tagged` writes for an externally tagged
+            // payload. Same bytes, so there is no second writer for it.
+            $w.write_tagged($tag, $name);
+            return;
+        }
+    };
+    ($self:ident, $w:ident, $name:expr, $tag:expr, $variant:ident ($($payload:tt)*)) => {
+        if let Self::$variant(v) = $self {
+            $w.write_internally_tagged($tag, $name, v);
+            return;
+        }
+    };
+}
+
 /// One arm of `write`, in either format.
 ///
 /// The one helper the two formats share, because the two calls are spelled the
@@ -1889,8 +2388,15 @@ macro_rules! __write_variant {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __beve_enum_impls {
+    // A tag key, for [`__json_enum_impls!`](crate::__json_enum_impls)'s reason.
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty { $($body:tt)* }
+    ) => {
+        $crate::__beve_internal_enum_impls!(
+            [$($rgen)*] [$($wgen)*] [$case] [$tag] $ty { $($body)* });
+    };
+    (
+        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         }
     ) => {

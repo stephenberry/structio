@@ -112,6 +112,7 @@ Long lines are trimmed around the caret so the output stays readable. The input 
 | `ExpectedComplex` | A `Complex` was expected but the value was neither a complex extension nor a two-element array. |
 | `ExpectedMatrix` | A `Matrix` was expected but the value was neither a matrix extension nor an object holding its three members. |
 | `ExpectedVariant` | An enum was neither a variant name nor an object holding exactly one member that names one. |
+| `ExpectedTag` | An [internally tagged](enums.md#internal-tagging) enum's object did not begin with its tag. The tag has to be the first member, so that one pass over the object is enough to know what it is; an object starting with any other key is refused here rather than searched. Also covers an object with no members, and a tag whose value is not a string. A tag that *is* first and names nothing is `UnknownVariant` instead. |
 | `ArrayLengthMismatch` | A fixed-size target (`[T; N]`, a tuple) did not match the input's length. |
 | `ExpectedSingleChar` | A `char` was requested but the string was not exactly one scalar value. |
 | `UnknownKey` | An object held a key no field of the destination claims. Read with [`SkipUnknown`](options.md#error_on_unknown_keys) to step over it instead. |
