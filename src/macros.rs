@@ -164,16 +164,16 @@
 /// assert_eq!(structio::to_string(&c), r#"{"host":"example","port":8080}"#);
 /// ```
 ///
-/// Generic and borrowing types take their impl generics in brackets. Write
-/// `'de` yourself when the type borrows from the input; it is the lifetime of
-/// the document being read.
+/// Generic and borrowing types take their impl generics in brackets. A type
+/// that borrows from the input names its lifetime first, under whatever name
+/// the struct gave it; it becomes the lifetime of the document being read.
 ///
 /// ```
 /// #[derive(Default)]
 /// struct Borrowed<'a> {
 ///     name: &'a str,
 /// }
-/// structio::object!(['de] Borrowed<'de> { name });
+/// structio::object!(['a] Borrowed<'a> { name });
 ///
 /// #[derive(Default)]
 /// struct Page<T> {
@@ -239,7 +239,7 @@ macro_rules! json_object {
 ///     id: u32,
 ///     payload: &'a [u8],
 /// }
-/// structio::beve_object!(['de] Frame<'de> { id, payload });
+/// structio::beve_object!(['a] Frame<'a> { id, payload });
 /// ```
 #[macro_export]
 macro_rules! beve_object {
@@ -250,9 +250,11 @@ macro_rules! beve_object {
 /// shared `Keys` impl.
 ///
 /// The three public macros differ only in which impls they want, and the rule
-/// for `'de` is the same for all of them: reading borrows from the input, so
-/// the read impls always need the lifetime, while the write impls must not
-/// declare one they do not constrain. Stating that once is the point.
+/// for the input lifetime is the same for all of them: reading borrows from
+/// the input, so the read impls always need the lifetime, while the write
+/// impls must not declare one they do not constrain. Stating that once is the
+/// point. A declaration that leads with a lifetime supplies it under that
+/// name; one without gets a `'de` the read impls introduce for themselves.
 ///
 /// The two lists handed on are the read generics and the write generics, in
 /// that order, and behind them the declaration's [case rule](crate::case) or
@@ -264,16 +266,16 @@ macro_rules! beve_object {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __declare {
-    // Generics that already declare `'de`: the type borrows from the input, so
+    // Generics that lead with a lifetime: the type borrows from the input, so
     // both impls use the list verbatim.
-    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
-        $crate::__declared!($m ['de $($gen)*] ['de $($gen)*] [$case] $ty { $($body)* });
+    ($m:ident [ $de:lifetime $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
+        $crate::__declared!($m [$de $($gen)*] [$de $($gen)*] [$case] $ty { $($body)* });
     };
-    ($m:ident [ 'de $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
-        $crate::__declared!($m ['de $($gen)*] ['de $($gen)*] [_] $ty { $($body)* });
+    ($m:ident [ $de:lifetime $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
+        $crate::__declared!($m [$de $($gen)*] [$de $($gen)*] [_] $ty { $($body)* });
     };
-    // Generics without `'de`: the read impls need it, the write impls must not
-    // declare an unconstrained lifetime.
+    // Generics without a lifetime: the read impls need one, the write impls
+    // must not declare an unconstrained lifetime.
     ($m:ident [ $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
         $crate::__declared!($m ['de, $($gen)*] [$($gen)*] [$case] $ty { $($body)* });
     };
@@ -488,11 +490,11 @@ macro_rules! __keys_impl {
 #[macro_export]
 macro_rules! __json_impls {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
+        [$de:lifetime $($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
         }
     ) => {
-        impl<$($rgen)*> $crate::json::ReadObject<'de> for $ty {
+        impl<$de $($rgen)*> $crate::json::ReadObject<$de> for $ty {
             // Deliberately not `inline(always)`: this body holds the parser for
             // every field, so forcing it into each caller duplicates a whole
             // nested struct's parser per field arm of its parent.
@@ -501,7 +503,7 @@ macro_rules! __json_impls {
             fn read_field<O: $crate::Options>(
                 &mut self,
                 index: usize,
-                p: &mut $crate::json::Parser<'de, O>,
+                p: &mut $crate::json::Parser<$de, O>,
             ) -> ::core::result::Result<bool, $crate::ErrorCode> {
                 // `macro_rules!` cannot count, so the field index is carried in
                 // a counter that const-folds away. LLVM rebuilds the same jump
@@ -552,11 +554,11 @@ macro_rules! __json_impls {
             }
         }
 
-        impl<$($rgen)*> $crate::json::Read<'de> for $ty {
+        impl<$de $($rgen)*> $crate::json::Read<$de> for $ty {
             #[inline]
             fn read<O: $crate::Options>(
                 &mut self,
-                p: &mut $crate::json::Parser<'de, O>,
+                p: &mut $crate::json::Parser<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 p.read_object(self)
             }
@@ -578,18 +580,18 @@ macro_rules! __json_impls {
 #[macro_export]
 macro_rules! __beve_impls {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
+        [$de:lifetime $($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($(#[$req:ident])? $($key:literal =>)? $field:ident $(as $with:ty)?),* $(,)?
         }
     ) => {
-        impl<$($rgen)*> $crate::beve::ReadObject<'de> for $ty {
+        impl<$de $($rgen)*> $crate::beve::ReadObject<$de> for $ty {
             #[inline]
             #[allow(unused_assignments, unused_variables, unused_mut)]
             fn read_field<O: $crate::Options>(
                 &mut self,
                 index: usize,
                 key: &[u8],
-                r: &mut $crate::beve::Reader<'de, O>,
+                r: &mut $crate::beve::Reader<$de, O>,
             ) -> ::core::result::Result<bool, $crate::ErrorCode> {
                 let mut i = 0usize;
                 $(
@@ -650,11 +652,11 @@ macro_rules! __beve_impls {
             }
         }
 
-        impl<$($rgen)*> $crate::beve::Read<'de> for $ty {
+        impl<$de $($rgen)*> $crate::beve::Read<$de> for $ty {
             #[inline]
             fn read<O: $crate::Options>(
                 &mut self,
-                r: &mut $crate::beve::Reader<'de, O>,
+                r: &mut $crate::beve::Reader<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 r.read_object(self)
             }
@@ -808,9 +810,10 @@ macro_rules! __case_check {
 
 /// Read a field, through its adapter if it named one.
 ///
-/// The `'_` binds to the generated impl's `'de` and the `_` to the field's own
-/// type, so an adapter over a borrowing field or over the declaration's own
-/// type parameter needs nothing spelled out.
+/// The `'_` binds to the generated impl's input lifetime, whatever the
+/// declaration named it, and the `_` to the field's own type, so an adapter
+/// over a borrowing field or over the declaration's own type parameter needs
+/// nothing spelled out.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __json_read_as {
@@ -899,7 +902,7 @@ macro_rules! __beve_is_null_as {
 /// policy.
 ///
 /// Generics work as they do for [`object!`]: in brackets before the type, with
-/// `'de` written out when the type borrows from the input.
+/// the lifetime written first when the type borrows from the input.
 ///
 /// ```
 /// #[derive(Default)]
@@ -907,7 +910,7 @@ macro_rules! __beve_is_null_as {
 ///     label: &'a str,
 ///     value: T,
 /// }
-/// structio::array!(['de, T: structio::ReadWrite + Default] Labelled<'de, T> [label, value]);
+/// structio::array!(['a, T: structio::ReadWrite + Default] Labelled<'a, T> [label, value]);
 /// ```
 ///
 /// # Homogeneous structs
@@ -1014,28 +1017,28 @@ macro_rules! beve_array {
 
 /// [`__declare!`](crate::__declare) for the array forms.
 ///
-/// The same normalization of `'de`, and the same two lists handed on, but no
+/// The same normalization of the input lifetime, and the same two lists handed on, but no
 /// `Keys` impl: a positional struct has no keys. What it shares instead is its
 /// length, which is [`Elements`](crate::Elements), and that is small enough to
 /// be generated alongside each set of impls rather than on its own.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __declare_array {
-    // Generics that already declare `'de`: the type borrows from the input, so
+    // Generics that lead with a lifetime: the type borrows from the input, so
     // both impls use the list verbatim.
     //
     // A case rule goes in front of each shape rather than after all three. An
     // arm that fails to match falls through, but a `$ty:ty` handed something
     // that cannot be a type at all is a parse error that ends the expansion,
     // so a trailing arm would never be reached from a generic declaration.
-    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as $case:tt [ $($body:tt)* ]) => {
+    ($m:ident [ $de:lifetime $($gen:tt)* ] $ty:ty as $case:tt [ $($body:tt)* ]) => {
         $crate::__no_array_case!();
     };
-    ($m:ident [ 'de $($gen:tt)* ] $ty:ty [ $($body:tt)* ]) => {
-        $crate::__declared_array!($m ['de $($gen)*] ['de $($gen)*] $ty [ $($body)* ]);
+    ($m:ident [ $de:lifetime $($gen:tt)* ] $ty:ty [ $($body:tt)* ]) => {
+        $crate::__declared_array!($m [$de $($gen)*] [$de $($gen)*] $ty [ $($body)* ]);
     };
-    // Generics without `'de`: the read impls need it, the write impls must not
-    // declare an unconstrained lifetime.
+    // Generics without a lifetime: the read impls need one, the write impls
+    // must not declare an unconstrained lifetime.
     ($m:ident [ $($gen:tt)* ] $ty:ty as $case:tt [ $($body:tt)* ]) => {
         $crate::__no_array_case!();
     };
@@ -1149,8 +1152,8 @@ macro_rules! __json_array_impls {
     ([$($rgen:tt)*] [$($wgen:tt)*] $ty:ty [ $elem:ty ; $($field:ident),* $(,)? ]) => {
         $crate::__json_array_impls!([$($rgen)*] [$($wgen)*] $ty [ $($field),* ]);
     };
-    ([$($rgen:tt)*] [$($wgen:tt)*] $ty:ty [ $($field:ident),* $(,)? ]) => {
-        impl<$($rgen)*> $crate::json::ReadArray<'de> for $ty {
+    ([$de:lifetime $($rgen:tt)*] [$($wgen:tt)*] $ty:ty [ $($field:ident),* $(,)? ]) => {
+        impl<$de $($rgen)*> $crate::json::ReadArray<$de> for $ty {
             // Deliberately not `inline(always)`, for `read_field`'s reason:
             // this body holds the parser for every element.
             #[inline]
@@ -1158,7 +1161,7 @@ macro_rules! __json_array_impls {
             fn read_element<O: $crate::Options>(
                 &mut self,
                 index: usize,
-                p: &mut $crate::json::Parser<'de, O>,
+                p: &mut $crate::json::Parser<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 // The same const-folding counter `read_field` uses, and for
                 // the same reason: expansion stays linear in the field count.
@@ -1189,11 +1192,11 @@ macro_rules! __json_array_impls {
             }
         }
 
-        impl<$($rgen)*> $crate::json::Read<'de> for $ty {
+        impl<$de $($rgen)*> $crate::json::Read<$de> for $ty {
             #[inline]
             fn read<O: $crate::Options>(
                 &mut self,
-                p: &mut $crate::json::Parser<'de, O>,
+                p: &mut $crate::json::Parser<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 p.read_array(self)
             }
@@ -1245,15 +1248,15 @@ macro_rules! __beve_array_impls {
 #[macro_export]
 macro_rules! __beve_array_body {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty [ $($field:ident),* ] { $($typed:tt)* }
+        [$de:lifetime $($rgen:tt)*] [$($wgen:tt)*] $ty:ty [ $($field:ident),* ] { $($typed:tt)* }
     ) => {
-        impl<$($rgen)*> $crate::beve::ReadArray<'de> for $ty {
+        impl<$de $($rgen)*> $crate::beve::ReadArray<$de> for $ty {
             #[inline]
             #[allow(unused_assignments, unused_variables, unused_mut)]
             fn read_element<O: $crate::Options>(
                 &mut self,
                 index: usize,
-                r: &mut $crate::beve::Reader<'de, O>,
+                r: &mut $crate::beve::Reader<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 let mut i = 0usize;
                 $(
@@ -1280,11 +1283,11 @@ macro_rules! __beve_array_body {
             $($typed)*
         }
 
-        impl<$($rgen)*> $crate::beve::Read<'de> for $ty {
+        impl<$de $($rgen)*> $crate::beve::Read<$de> for $ty {
             #[inline]
             fn read<O: $crate::Options>(
                 &mut self,
-                r: &mut $crate::beve::Reader<'de, O>,
+                r: &mut $crate::beve::Reader<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 r.read_array(self)
             }
@@ -1693,7 +1696,7 @@ macro_rules! beve_tagged_enum {
 
 /// [`__declare!`](crate::__declare) for the enum forms.
 ///
-/// The same normalization of `'de`, and the same two lists handed on. What it
+/// The same normalization of the input lifetime, and the same two lists handed on. What it
 /// shares across formats is [`Variants`](crate::Variants), the enum's
 /// counterpart of [`Keys`](crate::Keys).
 ///
@@ -1712,19 +1715,19 @@ macro_rules! beve_tagged_enum {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __declare_enum {
-    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as tag $tag:literal { $($body:tt)* }) => {
+    ($m:ident [ $de:lifetime $($gen:tt)* ] $ty:ty as tag $tag:literal { $($body:tt)* }) => {
         $crate::__declared_enum!(
-            $m ['de $($gen)*] ['de $($gen)*] [_] [$tag] $ty { $($body)* });
+            $m [$de $($gen)*] [$de $($gen)*] [_] [$tag] $ty { $($body)* });
     };
-    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as $case:tt tag $tag:literal { $($body:tt)* }) => {
+    ($m:ident [ $de:lifetime $($gen:tt)* ] $ty:ty as $case:tt tag $tag:literal { $($body:tt)* }) => {
         $crate::__declared_enum!(
-            $m ['de $($gen)*] ['de $($gen)*] [$case] [$tag] $ty { $($body)* });
+            $m [$de $($gen)*] [$de $($gen)*] [$case] [$tag] $ty { $($body)* });
     };
-    ($m:ident [ 'de $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
-        $crate::__declared_enum!($m ['de $($gen)*] ['de $($gen)*] [$case] [] $ty { $($body)* });
+    ($m:ident [ $de:lifetime $($gen:tt)* ] $ty:ty as $case:tt { $($body:tt)* }) => {
+        $crate::__declared_enum!($m [$de $($gen)*] [$de $($gen)*] [$case] [] $ty { $($body)* });
     };
-    ($m:ident [ 'de $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
-        $crate::__declared_enum!($m ['de $($gen)*] ['de $($gen)*] [_] [] $ty { $($body)* });
+    ($m:ident [ $de:lifetime $($gen:tt)* ] $ty:ty { $($body:tt)* }) => {
+        $crate::__declared_enum!($m [$de $($gen)*] [$de $($gen)*] [_] [] $ty { $($body)* });
     };
     ($m:ident [ $($gen:tt)* ] $ty:ty as tag $tag:literal { $($body:tt)* }) => {
         $crate::__declared_enum!($m ['de, $($gen)*] [$($gen)*] [_] [$tag] $ty { $($body)* });
@@ -1933,11 +1936,11 @@ macro_rules! __json_enum_impls {
             [$($rgen)*] [$($wgen)*] [$case] [$tag] $ty { $($body)* });
     };
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [] $ty:ty {
+        [$de:lifetime $($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         }
     ) => {
-        impl<$($rgen)*> $crate::json::ReadEnum<'de> for $ty {
+        impl<$de $($rgen)*> $crate::json::ReadEnum<$de> for $ty {
             // Deliberately not `inline(always)`, for `read_field`'s reason:
             // this body holds an arm for every variant.
             #[inline]
@@ -1945,7 +1948,7 @@ macro_rules! __json_enum_impls {
             fn read_name<O: $crate::Options>(
                 &mut self,
                 index: usize,
-                p: &mut $crate::json::Parser<'de, O>,
+                p: &mut $crate::json::Parser<$de, O>,
             ) -> ::core::result::Result<bool, $crate::ErrorCode> {
                 // The same const-folding counter `read_field` uses, and for the
                 // same reason: expansion stays linear in the variant count.
@@ -1968,7 +1971,7 @@ macro_rules! __json_enum_impls {
             fn read_payload<O: $crate::Options>(
                 &mut self,
                 index: usize,
-                p: &mut $crate::json::Parser<'de, O>,
+                p: &mut $crate::json::Parser<$de, O>,
             ) -> ::core::result::Result<bool, $crate::ErrorCode> {
                 let mut i = 0usize;
                 $(
@@ -1985,11 +1988,11 @@ macro_rules! __json_enum_impls {
             }
         }
 
-        impl<$($rgen)*> $crate::json::Read<'de> for $ty {
+        impl<$de $($rgen)*> $crate::json::Read<$de> for $ty {
             #[inline]
             fn read<O: $crate::Options>(
                 &mut self,
-                p: &mut $crate::json::Parser<'de, O>,
+                p: &mut $crate::json::Parser<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 p.read_enum(self)
             }
@@ -2106,11 +2109,11 @@ macro_rules! __json_read_payload {
 #[macro_export]
 macro_rules! __json_internal_enum_impls {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty {
+        [$de:lifetime $($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         }
     ) => {
-        impl<$($rgen)*> $crate::json::ReadInternallyTagged<'de> for $ty {
+        impl<$de $($rgen)*> $crate::json::ReadInternallyTagged<$de> for $ty {
             const TAG: &'static str = $tag;
 
             // Deliberately not `inline(always)`, for `read_field`'s reason:
@@ -2120,7 +2123,7 @@ macro_rules! __json_internal_enum_impls {
             fn read_variant<O: $crate::Options>(
                 &mut self,
                 index: usize,
-                p: &mut $crate::json::Parser<'de, O>,
+                p: &mut $crate::json::Parser<$de, O>,
                 open: usize,
             ) -> ::core::result::Result<bool, $crate::ErrorCode> {
                 // The same const-folding counter `read_field` uses, and for the
@@ -2140,11 +2143,11 @@ macro_rules! __json_internal_enum_impls {
             }
         }
 
-        impl<$($rgen)*> $crate::json::Read<'de> for $ty {
+        impl<$de $($rgen)*> $crate::json::Read<$de> for $ty {
             #[inline]
             fn read<O: $crate::Options>(
                 &mut self,
-                p: &mut $crate::json::Parser<'de, O>,
+                p: &mut $crate::json::Parser<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 p.read_internally_tagged(self)
             }
@@ -2235,11 +2238,11 @@ macro_rules! __json_read_internal {
 #[macro_export]
 macro_rules! __beve_internal_enum_impls {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty {
+        [$de:lifetime $($rgen:tt)*] [$($wgen:tt)*] [$case:tt] [$tag:literal] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         }
     ) => {
-        impl<$($rgen)*> $crate::beve::ReadInternallyTagged<'de> for $ty {
+        impl<$de $($rgen)*> $crate::beve::ReadInternallyTagged<$de> for $ty {
             const TAG: &'static str = $tag;
 
             #[inline]
@@ -2248,7 +2251,7 @@ macro_rules! __beve_internal_enum_impls {
                 &mut self,
                 index: usize,
                 name: &[u8],
-                r: &mut $crate::beve::Reader<'de, O>,
+                r: &mut $crate::beve::Reader<$de, O>,
                 remaining: usize,
                 open: usize,
             ) -> ::core::result::Result<bool, $crate::ErrorCode> {
@@ -2267,11 +2270,11 @@ macro_rules! __beve_internal_enum_impls {
             }
         }
 
-        impl<$($rgen)*> $crate::beve::Read<'de> for $ty {
+        impl<$de $($rgen)*> $crate::beve::Read<$de> for $ty {
             #[inline]
             fn read<O: $crate::Options>(
                 &mut self,
-                r: &mut $crate::beve::Reader<'de, O>,
+                r: &mut $crate::beve::Reader<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 r.read_internally_tagged(self)
             }
@@ -2462,11 +2465,11 @@ macro_rules! __beve_unit_enum_impls {
 #[macro_export]
 macro_rules! __beve_enum_body {
     (
-        [$($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
+        [$de:lifetime $($rgen:tt)*] [$($wgen:tt)*] [$case:tt] $ty:ty {
             $($($name:literal =>)? $variant:ident $(($($payload:tt)*))?),* $(,)?
         } { $($typed:tt)* }
     ) => {
-        impl<$($rgen)*> $crate::beve::ReadEnum<'de> for $ty {
+        impl<$de $($rgen)*> $crate::beve::ReadEnum<$de> for $ty {
             #[inline]
             #[allow(unused_assignments, unused_variables, unused_mut)]
             fn read_name(
@@ -2494,7 +2497,7 @@ macro_rules! __beve_enum_body {
                 &mut self,
                 index: usize,
                 name: &[u8],
-                r: &mut $crate::beve::Reader<'de, O>,
+                r: &mut $crate::beve::Reader<$de, O>,
             ) -> ::core::result::Result<bool, $crate::ErrorCode> {
                 let mut i = 0usize;
                 $(
@@ -2511,11 +2514,11 @@ macro_rules! __beve_enum_body {
             }
         }
 
-        impl<$($rgen)*> $crate::beve::Read<'de> for $ty {
+        impl<$de $($rgen)*> $crate::beve::Read<$de> for $ty {
             #[inline]
             fn read<O: $crate::Options>(
                 &mut self,
-                r: &mut $crate::beve::Reader<'de, O>,
+                r: &mut $crate::beve::Reader<$de, O>,
             ) -> ::core::result::Result<(), $crate::ErrorCode> {
                 r.read_enum(self)
             }

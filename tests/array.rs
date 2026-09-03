@@ -196,6 +196,23 @@ struct Borrowed<'a> {
 }
 structio::array!(['de] Borrowed<'de> [name, n]);
 
+/// The same shape under the struct's own lifetime name.
+#[derive(Default, Debug, PartialEq)]
+struct Named<'a> {
+    name: &'a str,
+    n: u32,
+}
+structio::array!(['a] Named<'a> [name, n]);
+
+#[test]
+fn a_borrowed_array_keeps_its_own_lifetime_name() {
+    let json = String::from(r#"["row",3]"#);
+    let row: Named = structio::from_str(&json).unwrap();
+    assert_eq!(row, Named { name: "row", n: 3 });
+    assert!(std::ptr::eq(row.name.as_ptr(), json[2..].as_ptr()));
+    assert_eq!(structio::to_string(&row), json);
+}
+
 #[test]
 fn borrowed_elements() {
     let json = r#"["hi",3]"#;

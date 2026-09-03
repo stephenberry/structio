@@ -66,13 +66,14 @@ object!(Team { lead, roster });
 ```
 
 Generic and borrowing types take their impl generics in brackets, since a
-`macro_rules!` pattern cannot tell one from the other. Write `'de` yourself when
-the type borrows from the input; it is the lifetime of the document.
+`macro_rules!` pattern cannot tell one from the other. A type that borrows from
+the input names its lifetime first, whatever the struct calls it; it becomes
+the lifetime of the document.
 
 ```rust
 #[derive(Default)]
 struct Borrowed<'a> { name: &'a str }
-object!(['de] Borrowed<'de> { name });
+object!(['a] Borrowed<'a> { name });
 
 #[derive(Default)]
 struct Page<T> { items: Vec<T>, cursor: Option<String> }

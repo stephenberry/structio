@@ -145,6 +145,29 @@ struct Borrowed<'a> {
 }
 structio::object!(['de] Borrowed<'de> { name, tag });
 
+/// The same declaration under the struct's own lifetime name. `'de` is what
+/// the read impls call the input lifetime, not a name the declaration has to
+/// use: the first lifetime in the bracket is taken as it comes.
+#[derive(Default, Debug, PartialEq)]
+struct Named<'a> {
+    name: &'a str,
+    tag: std::borrow::Cow<'a, str>,
+}
+structio::object!(['a] Named<'a> as "camelCase" { name, tag });
+
+#[test]
+fn a_borrowed_type_keeps_its_own_lifetime_name() {
+    let json = String::from(r#"{"name":"zero copy","tag":"plain"}"#);
+    let n: Named = from_str(&json).unwrap();
+    assert_eq!(n.name, "zero copy");
+    assert!(std::ptr::eq(n.name.as_ptr(), json[9..].as_ptr()));
+    assert_eq!(structio::to_string(&n), json);
+
+    let beve = structio::to_beve(&n);
+    let back: Named = structio::from_beve(&beve).unwrap();
+    assert_eq!(back, n);
+}
+
 #[test]
 fn borrowed_strings_do_not_copy() {
     let json = String::from(r#"{"name":"zero copy","tag":"plain"}"#);
@@ -320,11 +343,23 @@ fn malformed_input_is_rejected() {
     }
 }
 
+/// Nesting is bounded at the published `MAX_DEPTH`, so a caller can size its
+/// own documents against it: the object plus `MAX_DEPTH - 1` arrays sits
+/// exactly at the limit and reads, one more array does not.
 #[test]
-fn deep_nesting_is_bounded() {
+fn deep_nesting_is_bounded_at_the_published_limit() {
     // An unknown key, so the nesting is walked by the value skipper.
-    let deep = format!("{{\"unknown\":{}{}}}", "[".repeat(400), "]".repeat(400));
-    let err = from_str_with::<SkipUnknown, Person>(&deep).unwrap_err();
+    let nest = |arrays: usize| {
+        format!(
+            "{{\"unknown\":{}{}}}",
+            "[".repeat(arrays),
+            "]".repeat(arrays)
+        )
+    };
+    let at_limit = nest(structio::json::MAX_DEPTH as usize - 1);
+    from_str_with::<SkipUnknown, Person>(&at_limit).unwrap();
+    let over = nest(structio::json::MAX_DEPTH as usize);
+    let err = from_str_with::<SkipUnknown, Person>(&over).unwrap_err();
     assert_eq!(err.code, ErrorCode::ExceededMaxDepth);
 }
 

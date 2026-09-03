@@ -83,6 +83,26 @@ enum Ref<'a> {
 }
 structio::tagged_enum!(['de] Ref<'de> { Nothing, Text(_) });
 
+/// The same enum under its own lifetime name; the bracket's first lifetime is
+/// the input lifetime whatever it is called.
+#[derive(Default, PartialEq, Debug)]
+enum NamedRef<'a> {
+    #[default]
+    Nothing,
+    Text(&'a str),
+}
+structio::tagged_enum!(['a] NamedRef<'a> { Nothing, Text(_) });
+
+#[test]
+fn a_borrowing_enum_keeps_its_own_lifetime_name() {
+    let json = String::from(r#"{"Text":"borrowed"}"#);
+    let value: NamedRef = structio::from_str(&json).unwrap();
+    assert_eq!(value, NamedRef::Text("borrowed"));
+    assert_eq!(structio::to_string(&value), json);
+    let beve = structio::to_beve(&value);
+    assert_eq!(structio::from_beve::<NamedRef>(&beve).unwrap(), value);
+}
+
 /// A generic enum, declared the way a generic struct is.
 #[derive(Default, PartialEq, Debug, Clone)]
 enum Message<T> {
