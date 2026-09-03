@@ -6,6 +6,8 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-03
+
 ### Changed
 
 - **A borrowing type names its lifetime as it likes.** `object!(['a] Borrowed<'a> { .. })` now works, as do `array!`, `tagged_enum!` and their single-format forms: the first lifetime in the bracket is the input lifetime, whatever it is called. It had to be spelled `'de`, and any other name failed from inside the expansion with "lifetime may not live long enough" and no hint about why. Declarations written with `'de` are unchanged.
@@ -77,7 +79,8 @@ First release.
 - **Errors locate themselves.** `Error` carries a byte offset, `Error::display_with(input)` renders one with a line, column, and caret, and a `MissingKey` names the absent key.
 - `Parser::read_number_str` and `Writer::write_number_str`: a number's text, borrowed and written verbatim, for a fixed-point, decimal, bignum, or rational type. JSON only.
 
-[Unreleased]: https://github.com/stephenberry/structio/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/stephenberry/structio/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/stephenberry/structio/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/stephenberry/structio/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/stephenberry/structio/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/stephenberry/structio/compare/v0.2.0...v0.2.1
