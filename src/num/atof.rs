@@ -14,7 +14,7 @@
 
 use super::table::{LARGEST_POWER_OF_FIVE, POWER_OF_FIVE_128, SMALLEST_POWER_OF_FIVE};
 use crate::error::{ErrorCode, PResult};
-use crate::num::atoi::is_digit;
+use crate::num::atoi::{SAFE_DIGITS, fold_digits, is_digit};
 
 /// The parts of a decimal literal, before any rounding decision.
 struct Decimal {
@@ -47,7 +47,11 @@ pub(crate) trait RawFloat: Copy {
     fn pow10_exact(i: usize) -> Self;
     fn mul(self, rhs: Self) -> Self;
     fn div(self, rhs: Self) -> Self;
-    fn neg(self) -> Self;
+    /// Apply a sign to a non-negative value.
+    ///
+    /// Setting the sign bit rather than negating, so that a document whose
+    /// signs are unpredictable does not pay a mispredicted branch per value.
+    fn with_sign(self, negative: bool) -> Self;
     fn parse_fallback(s: &str) -> Self;
 }
 
@@ -90,8 +94,9 @@ impl RawFloat for f64 {
         self / rhs
     }
     #[inline(always)]
-    fn neg(self) -> Self {
-        -self
+    fn with_sign(self, negative: bool) -> Self {
+        debug_assert!(!self.is_sign_negative());
+        f64::from_bits(self.to_bits() | ((negative as u64) << 63))
     }
     #[inline(never)]
     fn parse_fallback(s: &str) -> Self {
@@ -135,8 +140,9 @@ impl RawFloat for f32 {
         self / rhs
     }
     #[inline(always)]
-    fn neg(self) -> Self {
-        -self
+    fn with_sign(self, negative: bool) -> Self {
+        debug_assert!(!self.is_sign_negative());
+        f32::from_bits(self.to_bits() | ((negative as u32) << 31))
     }
     #[inline(never)]
     fn parse_fallback(s: &str) -> Self {
@@ -189,6 +195,11 @@ fn product_approx(q: i64, w: u64, precision: i32) -> (u64, u64) {
 }
 
 /// Biased mantissa and exponent, or `None` when 128 bits could not decide.
+///
+/// Always inlined, for the reason `Parser::read_u64` gives: this is what an
+/// array of floats runs per element, and left as a call it costs the parser
+/// its cursor, spilled around the call and reloaded after it.
+#[inline(always)]
 fn compute_float<F: RawFloat>(q: i64, mut w: u64) -> Option<(u64, i32)> {
     if w == 0 || q < F::SMALLEST_POWER_OF_TEN as i64 {
         return Some((0, 0));
@@ -255,68 +266,43 @@ fn compute_float<F: RawFloat>(q: i64, mut w: u64) -> Option<(u64, i32)> {
 }
 
 /// Scan a JSON number literal. Leaves `*i` on the first byte after the token.
+///
+/// The digits are accumulated blind and counted afterwards, which keeps the
+/// per-digit work to the fold itself. A leading zero on the integer part, an
+/// empty fraction, and a count past [`SAFE_DIGITS`] are all settled from the
+/// positions the folds stopped at.
+#[inline(always)]
 fn scan(buf: &[u8], i: &mut usize) -> PResult<Decimal> {
     let n = buf.len();
     let mut idx = *i;
 
     let negative = idx < n && buf[idx] == b'-';
-    if negative {
-        idx += 1;
-    }
-
-    let mut mantissa: u64 = 0;
-    let mut digits = 0i32;
-    let mut exp10: i64 = 0;
-    let mut truncated = false;
+    idx += negative as usize;
 
     if idx >= n || !is_digit(buf[idx]) {
         return Err(ErrorCode::ExpectedNumber);
     }
 
     // Integer part. JSON forbids a leading zero followed by more digits.
-    if buf[idx] == b'0' {
-        idx += 1;
-        if idx < n && is_digit(buf[idx]) {
-            return Err(ErrorCode::InvalidNumber);
-        }
-    } else {
-        while idx < n && is_digit(buf[idx]) {
-            let d = buf[idx] - b'0';
-            if digits < 19 {
-                mantissa = mantissa * 10 + d as u64;
-                digits += 1;
-            } else {
-                // Past 19 digits the value no longer fits; keep the magnitude
-                // by growing the exponent instead.
-                exp10 += 1;
-                truncated |= d != 0;
-            }
-            idx += 1;
-        }
+    let int_start = idx;
+    let (mut mantissa, mut idx) = fold_digits(buf, idx, 0);
+    let int_digits = idx - int_start;
+    if buf[int_start] == b'0' && int_digits > 1 {
+        return Err(ErrorCode::InvalidNumber);
     }
 
     // Fraction.
+    let mut frac_start = idx;
+    let mut frac_digits = 0usize;
     if idx < n && buf[idx] == b'.' {
-        idx += 1;
-        if idx >= n || !is_digit(buf[idx]) {
+        frac_start = idx + 1;
+        (mantissa, idx) = fold_digits(buf, frac_start, mantissa);
+        frac_digits = idx - frac_start;
+        if frac_digits == 0 {
             return Err(ErrorCode::InvalidNumber);
         }
-        while idx < n && is_digit(buf[idx]) {
-            let d = buf[idx] - b'0';
-            if mantissa == 0 && d == 0 {
-                // A leading zero after the point shifts the exponent without
-                // contributing a significant digit.
-                exp10 -= 1;
-            } else if digits < 19 {
-                mantissa = mantissa * 10 + d as u64;
-                digits += 1;
-                exp10 -= 1;
-            } else {
-                truncated |= d != 0;
-            }
-            idx += 1;
-        }
     }
+    let mut exp10 = -(frac_digits as i64);
 
     // Exponent.
     if idx < n && (buf[idx] | 0x20) == b'e' {
@@ -342,6 +328,14 @@ fn scan(buf: &[u8], i: &mut usize) -> PResult<Decimal> {
     }
 
     *i = idx;
+    let mut truncated = false;
+    if int_digits + frac_digits > SAFE_DIGITS {
+        (mantissa, exp10, truncated) = refold_long(
+            &buf[int_start..int_start + int_digits],
+            &buf[frac_start..frac_start + frac_digits],
+            exp10,
+        );
+    }
     Ok(Decimal {
         mantissa,
         exp10,
@@ -350,8 +344,68 @@ fn scan(buf: &[u8], i: &mut usize) -> PResult<Decimal> {
     })
 }
 
+/// Redo a number of more than [`SAFE_DIGITS`] digits, whose blind accumulation
+/// may have wrapped.
+///
+/// Leading zeros carry no value, so they are stepped over first; a number
+/// that is short enough once they are gone was accumulated correctly and only
+/// needs the exponent it already has. Otherwise the first [`SAFE_DIGITS`]
+/// significant digits are folded again, every digit dropped after them
+/// raises `exp10` by one, and `truncated` reports whether any of them was
+/// nonzero, which is what tells the caller the mantissa is a lower bound.
+///
+/// Cold and out of line: a number this wide is past what an `f64` can
+/// distinguish, and keeping it out of [`scan`] is what keeps that small.
+/// The two runs of digits arrive as slices of the document, so nothing in
+/// the caller has its address taken, which would pin it to the stack for the
+/// whole of the array loop around it.
+#[cold]
+#[inline(never)]
+fn refold_long(int: &[u8], frac: &[u8], exp10: i64) -> (u64, i64, bool) {
+    // The two runs of digits, in order of significance, as one sequence.
+    let digits = int
+        .iter()
+        .chain(frac)
+        .map(|b| b - b'0')
+        .skip_while(|&d| d == 0);
+
+    let mut mantissa: u64 = 0;
+    let mut kept = 0usize;
+    let mut dropped = 0i64;
+    let mut truncated = false;
+    for d in digits {
+        if kept < SAFE_DIGITS {
+            mantissa = mantissa * 10 + d as u64;
+            kept += 1;
+        } else {
+            dropped += 1;
+            truncated |= d != 0;
+        }
+    }
+    (mantissa, exp10 + dropped, truncated)
+}
+
+/// [`compute_float`] for a mantissa that had digits dropped from it.
+///
+/// The true mantissa then lies in `[m, m+1]`, so both ends must round the
+/// same way for the result to be certain. Out of line and cold: a number
+/// with more than nineteen significant digits is rare in any document, and
+/// keeping the second product out of [`parse_float`] is what keeps the first
+/// one inlined.
+#[cold]
+#[inline(never)]
+fn compute_float_truncated<F: RawFloat>(q: i64, w: u64) -> Option<(u64, i32)> {
+    match (compute_float::<F>(q, w), compute_float::<F>(q, w + 1)) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        _ => None,
+    }
+}
+
 /// Parse a JSON number into `F`, advancing `*i` past the token.
-#[inline]
+///
+/// Always inlined: this is the body of an array of floats, and the parser's
+/// `read_f64` says why a hint is not enough.
+#[inline(always)]
 pub(crate) fn parse_float<F: RawFloat>(buf: &[u8], i: &mut usize) -> PResult<F> {
     let start = *i;
     let d = scan(buf, i)?;
@@ -359,8 +413,7 @@ pub(crate) fn parse_float<F: RawFloat>(buf: &[u8], i: &mut usize) -> PResult<F> 
 
     if d.mantissa == 0 {
         // Preserve the sign of zero: `-0.0` is a distinct value.
-        let z = F::from_bits(0, 0);
-        return Ok(if d.negative { z.neg() } else { z });
+        return Ok(F::from_bits(0, 0).with_sign(d.negative));
     }
 
     // Tier 1: both operands exactly representable, so one operation is exact.
@@ -375,29 +428,18 @@ pub(crate) fn parse_float<F: RawFloat>(buf: &[u8], i: &mut usize) -> PResult<F> 
         } else {
             m.mul(F::pow10_exact(d.exp10 as usize))
         };
-        return Ok(if d.negative { v.neg() } else { v });
+        return Ok(v.with_sign(d.negative));
     }
 
-    // Tier 2: Eisel-Lemire. When digits were dropped the true mantissa lies in
-    // `[m, m+1]`, so both ends must round the same way for the result to be
-    // certain.
-    let resolved = match compute_float::<F>(d.exp10, d.mantissa) {
-        Some(a) => {
-            if d.truncated {
-                match compute_float::<F>(d.exp10, d.mantissa + 1) {
-                    Some(b) if a == b => Some(a),
-                    _ => None,
-                }
-            } else {
-                Some(a)
-            }
-        }
-        None => None,
+    // Tier 2: Eisel-Lemire.
+    let resolved = if d.truncated {
+        compute_float_truncated::<F>(d.exp10, d.mantissa)
+    } else {
+        compute_float::<F>(d.exp10, d.mantissa)
     };
 
     if let Some((mantissa, exponent)) = resolved {
-        let v = F::from_bits(mantissa, exponent);
-        return Ok(if d.negative { v.neg() } else { v });
+        return Ok(F::from_bits(mantissa, exponent).with_sign(d.negative));
     }
 
     // Tier 3: exact big-integer arithmetic, via the standard library. This is

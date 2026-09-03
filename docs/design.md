@@ -104,11 +104,11 @@ One asymmetry falls out of matching the standard library on parse: `1e400` reads
 
 Integers accumulate **unchecked**. Nineteen decimal digits always fit a `u64`, so overflow is decided once from the digit count rather than with a `checked_mul` per digit. This was worth 1.7x on integer-heavy documents: the per-digit branch chain, not the arithmetic, was the cost. Twenty or more digits fall to a cold out-of-line path that redoes the work with checked arithmetic.
 
-The bulk loop is SWAR, eight digits per iteration, validated with two adds and a mask and folded with three multiplies.
+The digits are folded a word at a time, both for integers and for the two runs of a float: eight digits per step when the word is all digits, validated with two adds and a mask and folded with three multiplies, and the word holding the end of the run in one step too, by shifting the digits it holds up and filling behind them with `'0'` so that the same fold reads them with leading zeros. There is no loop over the bytes of a short number and no branch on how many there were, which matters because that branch lands somewhere different on every value of a document whose numbers vary in length.
 
 Floats parse in three tiers: an exact path (mantissa at most 2^53, small exponent, one hardware multiply), Eisel-Lemire, and for the handful of inputs where 128 bits cannot resolve a tie, the standard library's big-integer path. The third tier effectively never runs, and deferring to `str::parse` there is both correct by construction and less code than a second big-decimal implementation.
 
-`Parser::read_number_str`, which hands a number's text to a type this crate cannot convert to, walks the float scanner and discards the mantissa it accumulated. That costs a multiply and an add per digit against holding a second copy of the number grammar in step with the first, which is not a trade worth making for a path whose caller is about to run an arbitrary-precision parse.
+`Parser::read_number_str`, which hands a number's text to a type this crate cannot convert to, walks the float scanner and discards the mantissa it accumulated. That costs a fold per word against holding a second copy of the number grammar in step with the first, which is not a trade worth making for a path whose caller is about to run an arbitrary-precision parse.
 
 ## The writer
 

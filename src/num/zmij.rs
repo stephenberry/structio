@@ -22,6 +22,8 @@
 //! [zmij]: https://github.com/vitaut/zmij
 //! [Glaze]: https://github.com/stephenberry/glaze
 
+use super::ZEROS;
+
 /// Scratch width for the digit bytes.
 ///
 /// Seventeen digits and a leading pad is all that is ever used; the rest is
@@ -340,7 +342,11 @@ fn to_decimal_irregular(bin_sig: u64, bin_exp: i32) -> Decimal {
 }
 
 /// `f64` significand and exponent. `bin_sig` carries the implicit bit.
-#[inline]
+///
+/// Always inlined: with one call site on the hot path this is the body of an
+/// array of floats being written, and left as a hint it was the call the
+/// writer made per element, with the value's words spilled around it.
+#[inline(always)]
 fn to_decimal_f64(bin_sig: u64, raw_exp: i32, regular: bool) -> Decimal {
     let bin_exp = raw_exp - EXP_OFFSET_F64;
     if !regular {
@@ -385,7 +391,7 @@ const F32_EXTRA_SHIFT: i32 = 34;
 const F32_FRAC_MASK: u64 = (1u64 << F32_EXTRA_SHIFT) - 1;
 
 /// `f32` significand and exponent. `bin_sig` carries the implicit bit.
-#[inline]
+#[inline(always)]
 fn to_decimal_f32(bin_sig: u32, raw_exp: i32, regular: bool) -> Decimal {
     let bin_exp = raw_exp - EXP_OFFSET_F32;
     if !regular {
@@ -425,9 +431,6 @@ fn to_decimal_f32(bin_sig: u32, raw_exp: i32, regular: bool) -> Decimal {
 // ---------------------------------------------------------------------------
 // Digit generation
 // ---------------------------------------------------------------------------
-
-/// `'0'` in all eight bytes.
-const ZEROS: u64 = 0x3030_3030_3030_3030;
 
 /// Split an eight-digit number into one digit per byte, most significant
 /// first, and report where its trailing zeros begin.
@@ -531,52 +534,67 @@ fn lay_out<const WIDTH: usize>(d: &Decimal, padded: bool, e10: i32) -> Digits {
     }
 }
 
+/// `f64` significands land in `[10^14, 10^16)`; at or above this they occupy
+/// all sixteen digits and need no left pad.
+const F64_THRESHOLD: u64 = 1_000_000_000_000_000;
+
+/// `f32` significands land in `[10^6, 10^8)`; at or above this they occupy
+/// all eight digits and need no left pad.
+const F32_THRESHOLD: u64 = 10_000_000;
+
 /// Shortest round-tripping digits for a positive, finite, normal-or-subnormal
 /// `f64`. Zero must be handled by the caller.
 pub(crate) fn digits_f64(mag: f64) -> Digits {
-    /// `f64` significands land in `[10^14, 10^16)`; at or above this they
-    /// occupy all sixteen digits and need no left pad.
-    const THRESHOLD: u64 = 1_000_000_000_000_000;
-
     let bits = mag.to_bits();
     let raw_exp = ((bits >> 52) & 0x7ff) as i32;
     let bin_sig = bits & ((1u64 << 52) - 1);
     debug_assert!(raw_exp != 0x7ff && mag > 0.0);
 
     let d = if raw_exp == 0 {
-        rescale_subnormal(&to_decimal_f64(bin_sig, 1, true), THRESHOLD)
+        subnormal_f64(bin_sig)
     } else {
         to_decimal_f64(bin_sig | (1u64 << 52), raw_exp, bin_sig != 0)
     };
 
     // `sig` spells sixteen digits, so its leading digit sits fifteen places
     // above the one `d.exp` names, or fourteen when the top digit is the pad.
-    let full_width = d.sig >= THRESHOLD;
+    let full_width = d.sig >= F64_THRESHOLD;
     let e10 = d.exp + 15 + full_width as i32;
     lay_out::<16>(&d, !full_width, e10)
+}
+
+/// The subnormal case of [`digits_f64`], out of line so that the conversion
+/// has one call site on the hot path and inlines there.
+#[cold]
+#[inline(never)]
+fn subnormal_f64(bin_sig: u64) -> Decimal {
+    rescale_subnormal(&to_decimal_f64(bin_sig, 1, true), F64_THRESHOLD)
+}
+
+/// The subnormal case of [`digits_f32`]; see [`subnormal_f64`].
+#[cold]
+#[inline(never)]
+fn subnormal_f32(bin_sig: u32) -> Decimal {
+    rescale_subnormal(&to_decimal_f32(bin_sig, 1, true), F32_THRESHOLD)
 }
 
 /// Shortest round-tripping digits for a positive, finite `f32`. Zero must be
 /// handled by the caller.
 pub(crate) fn digits_f32(mag: f32) -> Digits {
-    /// `f32` significands land in `[10^6, 10^8)`; at or above this they occupy
-    /// all eight digits and need no left pad.
-    const THRESHOLD: u64 = 10_000_000;
-
     let bits = mag.to_bits();
     let raw_exp = ((bits >> 23) & 0xff) as i32;
     let bin_sig = bits & ((1u32 << 23) - 1);
     debug_assert!(raw_exp != 0xff && mag > 0.0);
 
     let mut d = if raw_exp == 0 {
-        rescale_subnormal(&to_decimal_f32(bin_sig, 1, true), THRESHOLD)
+        subnormal_f32(bin_sig)
     } else {
         to_decimal_f32(bin_sig | (1u32 << 23), raw_exp, bin_sig != 0)
     };
 
     // `sig` spells eight digits, so its leading digit sits seven places above
     // the one `d.exp` names, or six when the top digit is the pad.
-    let full_width = d.sig >= THRESHOLD;
+    let full_width = d.sig >= F32_THRESHOLD;
     let mut e10 = d.exp + 7 + full_width as i32;
     if d.sig < 1_000_000 {
         // A digit short even of the padded width. Shifting up restores it, and

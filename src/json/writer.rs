@@ -1034,43 +1034,66 @@ impl<'a, O: Options> Writer<'a, O> {
 
     /// Write a quoted, escaped JSON string.
     ///
-    /// The common case is a string with nothing to escape, so the scan runs
-    /// eight bytes at a time and copies whole runs between escapes rather than
-    /// testing byte by byte.
+    /// The common case is a string with nothing to escape, and it is copied a
+    /// word at a time as it is scanned: each eight bytes are stored into the
+    /// spare capacity before the mask says whether they were clean, so a
+    /// clean word costs a load, a store and the mask, and the only branch is
+    /// the one that is never taken. Scanning first and copying the run
+    /// afterwards, as this used to, ended in a `memcpy` whose length the
+    /// compiler could not see, and for the short strings documents are full
+    /// of the call cost more than the bytes. The stored word is counted into
+    /// the length only as far as the first byte that needs escaping, so an
+    /// overshoot lands in spare capacity and is overwritten by what follows.
     pub fn write_str(&mut self, s: &str) {
         let bytes = s.as_bytes();
-        // One hint for the whole string, so the ordinary no-escape case makes
-        // a single trip through `spill`.
-        self.room(bytes.len() + 2);
+        let n = bytes.len();
+        // Both quotes, the string, and the seven bytes a word-wide store can
+        // reach past its end. One hint for the whole string, so the ordinary
+        // no-escape case makes a single trip through `spill`.
+        self.room(n + 2 + 8);
         self.push(b'"');
 
-        let mut start = 0;
         let mut i = 0;
-        let n = bytes.len();
-
+        let mut o = self.buf.len();
         while i < n {
-            // Bulk scan: skip eight bytes at a time while none need escaping.
             if i + 8 <= n {
-                // SAFETY: `i + 8 <= n`, so the read is in bounds.
-                let m = escape_mask(unsafe { load_u64(bytes, i) });
+                // SAFETY: `i + 8 <= n` keeps the load inside `bytes`. For the
+                // store, `o` never runs ahead of `i` by more than the length
+                // the loop started from, so `o + 8 <= len + n + 8`, which is
+                // the capacity `room` guaranteed, both above and after each
+                // escape.
+                let word = unsafe { load_u64(bytes, i) };
+                unsafe { store_u64(&mut self.buf, o, word) };
+                let m = escape_mask(word);
                 if m == 0 {
                     i += 8;
+                    o += 8;
                     continue;
                 }
-                // The mask already located the byte, so jump to it rather than
-                // walking the chunk again one byte at a time.
-                i += first_match(m);
+                // The clean bytes before the match are already in place;
+                // count them and take the escape from there.
+                let k = first_match(m);
+                i += k;
+                o += k;
             } else if !needs_escape(bytes[i]) {
+                // SAFETY: `o < len + n`, by the same argument.
+                unsafe { store_u8(&mut self.buf, o, bytes[i]) };
                 i += 1;
+                o += 1;
                 continue;
             }
             let c = bytes[i];
-            self.append(&bytes[start..i]);
+            // SAFETY: every byte below `o` has been written by a store above.
+            unsafe { self.buf.set_len(o) };
             self.write_escape(c);
             i += 1;
-            start = i;
+            // The escape went through the checked path and may have moved the
+            // buffer; restate the guarantee for what is left.
+            self.room(n - i + 8);
+            o = self.buf.len();
         }
-        self.append(&bytes[start..]);
+        // SAFETY: as above, every byte below `o` has been written.
+        unsafe { self.buf.set_len(o) };
         self.push(b'"');
     }
 
@@ -1093,4 +1116,29 @@ impl<'a, O: Options> Writer<'a, O> {
             }
         }
     }
+}
+
+/// Store a little-endian word into a buffer's spare capacity.
+///
+/// # Safety
+///
+/// `at + 8` must be within `buf`'s capacity.
+#[inline(always)]
+unsafe fn store_u64(buf: &mut Vec<u8>, at: usize, word: u64) {
+    debug_assert!(at + 8 <= buf.capacity());
+    // SAFETY: the caller guarantees the eight bytes are within capacity. The
+    // store is unaligned, which `write_unaligned` permits.
+    unsafe { (buf.as_mut_ptr().add(at) as *mut u64).write_unaligned(word.to_le()) };
+}
+
+/// Store one byte into a buffer's spare capacity.
+///
+/// # Safety
+///
+/// `at` must be within `buf`'s capacity.
+#[inline(always)]
+unsafe fn store_u8(buf: &mut Vec<u8>, at: usize, b: u8) {
+    debug_assert!(at < buf.capacity());
+    // SAFETY: the caller guarantees the byte is within capacity.
+    unsafe { buf.as_mut_ptr().add(at).write(b) };
 }

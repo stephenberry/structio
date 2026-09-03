@@ -4,6 +4,10 @@
 //! uses a two-digit table for integers and zmij for floats. Nothing here
 //! allocates.
 
+/// `'0'` in all eight bytes: the word the SWAR digit folds subtract, and the
+/// one the digit generators add.
+pub(crate) const ZEROS: u64 = 0x3030_3030_3030_3030;
+
 pub(crate) mod atof;
 pub(crate) mod atoi;
 pub(crate) mod dtoa;

@@ -70,6 +70,32 @@ The second difference the disassembly showed was whitespace. A four-way `matches
 
 The lesson worth keeping is that the conversion was never the cost. Stubbing it out entirely, before any of this, took `uints` only from 900 to 1391, because the call stayed. Look at what the compiler emitted before rewriting what the source says.
 
+### The float read was the same call, and the loops were the rest
+
+The float row was the widest gap in the table above, at 58%, and the disassembly showed the same shape the integer path had before: `<f64 as Read>::read` left out of line and called once per element, with the parser's cursor spilled around it. It was out of line for a reason that was not the float code's size at all. `Vec<T>`'s reader had two call sites for the element read, one for a slot it already held and one for a fresh value it would push, and the compiler was asked to inline the whole conversion into both. Pushing a default first and then reading into the slot, the same path for both cases, halved what was being asked, and with `read_f64` marked the way `read_u64` already was, the conversion sat in the loop.
+
+The second thing the disassembly showed was that the cursor was still in memory even where nothing was called per element. `parse_u64_wide`, the out-of-line path for wide integers, took the cursor as `&mut usize`, and a value whose address is handed to any call has to live on the stack for the whole of the loop around that call, stored before and reloaded after each element whether the call happens or not. Every out-of-line helper on these paths now takes the cursor by value and returns the new one, and the bool reader's cold fallback, which had been added taking `&mut self`, was measured putting the cursor back on the stack before it was changed to the same shape. The rule that fell out is worth stating on its own: **a `&mut` to the parser or its cursor, passed to anything that is not inlined, costs the loop it sits in a memory round trip per element.**
+
+Third, the branches that depend on the data. The benchmark's signs are random, and so are its bools, and a branch on either mispredicts on about every other value at ten to fifteen cycles each, which is more than the conversion costs. The sign of an integer is now applied through a mask, the sign of a float by setting its sign bit, and `true` and `false` are told apart by one eight-byte load compared against whichever the first byte says to expect, chosen with a select rather than a branch. That last one is where the compiler has to be watched: written as `is_true | is_false` over two compares it was turned back into a branch on each, and the document benchmark said so before the assembly did.
+
+Fourth, the digit loop. Both integer and float scanners walked digits one at a time, and the loop's exit is a branch that lands on a different digit for every value of a document whose numbers vary in length, so it mispredicted about as often as it ran. The scanners now load a word, light the lanes that are not digits, and fold the digits before the first lit lane in one step, by shifting them up and filling behind them with `'0'` so that the eight-digit fold reads them as a number with leading zeros. A number of one digit costs the same as one of seven, with no loop and no branch on the count. The docs above record a SWAR attempt on the integer path that went slower; that one located the terminator and then still looped over the digits. Integers up to fifteen digits take two of these steps inline, which is where identifiers and millisecond timestamps live and where the previous shape made a call: 13.7 ns a value became 6.4.
+
+Fifth, strings. An escape-free string was scanned a word at a time and then copied in one `memcpy` whose length the compiler could not see, and for the short strings documents are made of, the call cost more than the bytes. The scan now stores each word into spare capacity before the mask says whether it was clean, and counts the stored bytes into the length only as far as the first one that needs escaping. A string of fifteen characters went from 16.4 ns to 11.6.
+
+Per value, on a 10,000-element array of each, before and after:
+
+| | before | after |
+|---|---:|---:|
+| `f64`, 17 digits | 22.9 ns | 19.1 ns |
+| `f64`, short decimal | 16.9 ns | 13.0 ns |
+| `u64`, 1-7 digits | 5.9 ns | 5.4 ns |
+| `u64`, 13 digits | 13.7 ns | 6.4 ns |
+| `i64`, 1-7 digits, random sign | 10.8 ns | 7.3 ns |
+| `bool`, random | 4.4 ns | 3.6 ns |
+| `String`, 0-30 chars, written | 16.4 ns | 11.6 ns |
+
+Three things were tried on the float writer and measured, and none of them survived. Laying fixed notation out without a branch on the value's shape, as Glaze's table-driven layout does, was slower both as constant-width memory moves and as digits composed in registers with variable shifts: the shapes in these documents are predictable enough that the branches were cheap, and the branchless arithmetic was not. Rendering straight into the writer's spare capacity instead of a scratch array copied in afterwards changed nothing measurable, which retired a theory that the copy was stalling on store forwarding. And loading both words of a float's fraction before deciding on the first, to shorten the cursor's dependency chain, did nothing either. What is left on the float writer is what the section above says: the digit split, which Glaze does with NEON and this crate does with three scalar multiplies per half, and which this crate declines to do with intrinsics.
+
 ## Prettifying
 
 `prettify` lays out JSON text that arrived as text, with no type in the way, against `glz::prettify_json`. Both sides read the same compact document and indent it three spaces to a level, which is Glaze's default width; throughput is MB/s of the *input*.
