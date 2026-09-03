@@ -320,11 +320,23 @@ fn malformed_input_is_rejected() {
     }
 }
 
+/// Nesting is bounded at the published `MAX_DEPTH`, so a caller can size its
+/// own documents against it: the object plus `MAX_DEPTH - 1` arrays sits
+/// exactly at the limit and reads, one more array does not.
 #[test]
-fn deep_nesting_is_bounded() {
+fn deep_nesting_is_bounded_at_the_published_limit() {
     // An unknown key, so the nesting is walked by the value skipper.
-    let deep = format!("{{\"unknown\":{}{}}}", "[".repeat(400), "]".repeat(400));
-    let err = from_str_with::<SkipUnknown, Person>(&deep).unwrap_err();
+    let nest = |arrays: usize| {
+        format!(
+            "{{\"unknown\":{}{}}}",
+            "[".repeat(arrays),
+            "]".repeat(arrays)
+        )
+    };
+    let at_limit = nest(structio::json::MAX_DEPTH as usize - 1);
+    from_str_with::<SkipUnknown, Person>(&at_limit).unwrap();
+    let over = nest(structio::json::MAX_DEPTH as usize);
+    let err = from_str_with::<SkipUnknown, Person>(&over).unwrap_err();
     assert_eq!(err.code, ErrorCode::ExceededMaxDepth);
 }
 

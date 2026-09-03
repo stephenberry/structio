@@ -4,6 +4,12 @@ Notable changes to structio. The format follows [Keep a Changelog](https://keepa
 
 Before 1.0 the API is not frozen: a minor bump may break it, and what broke is listed here.
 
+## [Unreleased]
+
+### Added
+
+- `json::MAX_DEPTH` and `beve::MAX_DEPTH`, the nesting limit each reader enforces, re-exported at the module root. They were reachable only through `json::parser` and `beve::reader`.
+
 ## [0.3.0] - 2026-09-02
 
 ### Added
