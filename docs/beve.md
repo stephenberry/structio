@@ -124,7 +124,7 @@ let mut samples: Vec<f64> = Vec::new();
 structio::read_beve_array_into(&mut samples, file)?;
 ```
 
-The payload goes from the reader into the vector's own memory, so the vector is the only thing held rather than the vector plus the document, and the block copy `Documents::array` gives up is kept. A complex array reads the same way, into a `Vec<Complex<T>>`. The price is that it is exact where the rest of the crate is lenient: the stored element type has to be `T`'s, and a stored `f32` read as `f64` is `ElementTypeMismatch` rather than a conversion. That case is what `Documents::array` is for, converting an element at a time under the same memory bound. A count read off the wire is never reserved on its word, so there is no size limit to set here as there is on `Documents`.
+The payload goes from the reader into the vector's own memory, so the vector is the only thing held rather than the vector plus the document, and the block copy `Documents::array` gives up is kept. A complex array reads the same way, into a `Vec<Complex<T>>`. The price is that it is exact where the rest of the crate is lenient: the stored element type has to be `T`'s, and a stored `f32` read as `f64` is `ElementTypeMismatch` rather than a conversion. That case is what `Documents::array` is for, converting an element at a time under the same memory bound. A count read off the wire is never reserved on its word: a container reserves on it only after it has been clipped to what the input could hold and to a megabyte of elements (`beve::cautious`), so there is no size limit to set here as there is on `Documents`.
 
 ## Length-prefixed frames
 

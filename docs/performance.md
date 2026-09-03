@@ -162,7 +162,7 @@ The C++ baseline generates the documents and reports Glaze's numbers; `benches/r
 
 Nothing here is a micro-optimization applied after the fact; the shape of the library is the optimization.
 
-- **No intermediate representation.** A field's bytes are converted exactly once, into the member that will hold them. There is no `Value` enum, no token stream, and no document model to build and then walk.
+- **No intermediate representation.** A field's bytes are converted exactly once, into the member that will hold them. There is no token stream and no intermediate tree to build and then walk; `Value` is a destination you can ask for, never a stage on the way to a declared type.
 - **Keys are hashed at compile time.** The macro picks the cheapest perfect hash that fits your key set, from a single byte comparison up to a full key hash. Both formats look keys up in that one table.
 - **Reads reuse what you already own.** Parsing into an existing value refills its buffers instead of reallocating them, which is what makes a loop over records of the same shape settle into doing no allocation at all.
 - **BEVE numeric arrays are bulk copies** in both directions when the stored element type matches the destination's, and either form is taken whole: the aligned one is not a slower document to read here. It can also be no copy at all. `to_beve_aligned` pads each payload onto its own element width, and a `Cow<'de, [f64]>` field then points into the document instead of copying out of it, when the document's own address allows it.

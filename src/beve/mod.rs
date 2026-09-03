@@ -104,7 +104,7 @@ mod traits;
 pub mod writer;
 
 pub use impls::{FromBeveKey, NumericBytes, ToBeveKey};
-pub use reader::{Key, MAX_DEPTH, Reader};
+pub use reader::{Key, MAX_DEPTH, Reader, cautious};
 pub use stream::{Documents, Feed, Iter, Mode, from_reader_array, read_array_into};
 pub use traits::{
     Read, ReadArray, ReadAs, ReadEnum, ReadInternallyTagged, ReadKeyAs, ReadObject, ReadWrite,

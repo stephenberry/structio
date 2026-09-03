@@ -2,7 +2,7 @@
 //! [Glaze](https://github.com/stephenberry/glaze).
 //!
 //! Values are read straight into your types and written straight out of them.
-//! There is no `Value` enum, no token stream, and no document model: a field's
+//! There is no token stream and no intermediate document model: a field's
 //! bytes are converted exactly once, into the member that will hold them.
 //!
 //! ```
@@ -121,9 +121,12 @@
 //!
 //! # What it does not do
 //!
-//! This is only for statically known types. There is no lazy or generic value
-//! type: if you need to reach into arbitrary documents from code, this is the
-//! wrong tool.
+//! This is for statically known types. Reading a document you have no type
+//! for is a different matter, and [`Value`] is the tree for that case: a
+//! register map walked by path, a body forwarded unread. It is a destination
+//! like any other, not a stage every read passes through, and a value you
+//! could have declared a type for is better read into that type. See
+//! [`value`](mod@value) for what it holds and what it costs.
 //!
 //! A BEVE document can still be looked into without being decoded whole.
 //! [`from_beve_at`] reads the one value a JSON Pointer names and steps over
@@ -131,10 +134,9 @@
 //! without decoding any of it. What comes back from the first is still a type
 //! you declared.
 //!
-//! Reading a document you have no type for is a different matter, and
-//! [`beve_to_json`] is the one entry point that hands back its *contents*
-//! without one: it rewrites a whole BEVE document as JSON in a single walk. See
-//! [`transcode`] for what survives the trip and what does not.
+//! [`beve_to_json`] hands back a BEVE document's *contents* without a type
+//! and without a tree: it rewrites the whole document as JSON in a single
+//! walk. See [`transcode`] for what survives the trip and what does not.
 //!
 //! # Complex numbers and matrices
 //!
@@ -299,6 +301,7 @@ mod stream;
 mod swar;
 mod traits;
 pub mod transcode;
+pub mod value;
 
 pub use error::{Error, ErrorCode, Result, StreamError, StreamResult};
 pub use ext::{Complex, Matrix, MatrixLayout, MatrixRef};
@@ -308,6 +311,7 @@ pub use options::{
     Standard,
 };
 pub use traits::{Elements, Keys, ReadWrite, Same, Variants, assert_tag_not_a_field};
+pub use value::{Number, Object, Value, from_value, from_value_with, to_value};
 
 pub use json::{
     Documents, Feed, Mode, append, append_with, from_reader, from_reader_with, from_slice,

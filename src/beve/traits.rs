@@ -452,8 +452,7 @@ pub trait ReadEnum<'de>: Variants + Sized {
 /// method rather than two, there being one wire form: an object whose first
 /// member is the tag, and whose remaining members are the variant's own.
 pub trait ReadInternallyTagged<'de>: Variants + Sized {
-    /// The key that carries the variant name, and which every document must
-    /// put first.
+    /// The key that carries the variant name.
     const TAG: &'static str;
 
     /// Take variant `index`, the reader positioned on the members that follow

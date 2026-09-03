@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::beve::header;
-use crate::beve::reader::{Key, Reader};
+use crate::beve::reader::{Key, Reader, cautious};
 use crate::beve::traits::{
     Read, ReadArray, ReadAs, ReadKeyAs, Write, WriteArray, WriteAs, WriteKeyAs,
 };
@@ -668,14 +668,20 @@ impl<'de, T: Read<'de> + Default> Read<'de> for Vec<T> {
             return Ok(());
         }
         let held = self.len();
-        let n = r.read_seq(|r, i| {
-            if i < held {
-                self[i].read(r)
-            } else {
-                let mut v = T::default();
-                v.read(r)?;
-                self.push(v);
-                Ok(())
+        // A reborrow, so that what the closures take is given back for the
+        // truncate.
+        let out = &mut *self;
+        let n = r.read_seq_counted(|n| {
+            out.reserve(cautious::<T>(n).saturating_sub(held));
+            move |r, i| {
+                if i < held {
+                    out[i].read(r)
+                } else {
+                    let mut v = T::default();
+                    v.read(r)?;
+                    out.push(v);
+                    Ok(())
+                }
             }
         })?;
         self.truncate(n);
@@ -726,14 +732,20 @@ impl<T: Write + Clone> Write for Cow<'_, [T]> {
 impl<'de, T: Read<'de> + Default> Read<'de> for VecDeque<T> {
     fn read<O: Options>(&mut self, r: &mut Reader<'de, O>) -> PResult<()> {
         let held = self.len();
-        let n = r.read_seq(|r, i| {
-            if i < held {
-                self[i].read(r)
-            } else {
-                let mut v = T::default();
-                v.read(r)?;
-                self.push_back(v);
-                Ok(())
+        // A reborrow, so that what the closures take is given back for the
+        // truncate.
+        let out = &mut *self;
+        let n = r.read_seq_counted(|n| {
+            out.reserve(cautious::<T>(n).saturating_sub(held));
+            move |r, i| {
+                if i < held {
+                    out[i].read(r)
+                } else {
+                    let mut v = T::default();
+                    v.read(r)?;
+                    out.push_back(v);
+                    Ok(())
+                }
             }
         })?;
         self.truncate(n);
@@ -757,16 +769,20 @@ impl<'de, T: Read<'de>, const N: usize> Read<'de> for [T; N] {
 }
 
 /// A set has no positional storage to reuse, so it is emptied and refilled.
+/// A hashed one reserves on the count; a tree has nothing to reserve.
 macro_rules! impl_read_set {
-    ($([$($gen:tt)*] $ty:ty),* $(,)?) => {$(
+    ($([$($gen:tt)*] $ty:ty $(, reserve $reserve:ident)?),* $(,)?) => {$(
         impl<'de, T: Read<'de> + Default $($gen)*> Read<'de> for $ty {
             fn read<O: Options>(&mut self, r: &mut Reader<'de, O>) -> PResult<()> {
                 self.clear();
-                r.read_seq(|r, _| {
-                    let mut v = T::default();
-                    v.read(r)?;
-                    self.insert(v);
-                    Ok(())
+                r.read_seq_counted(|_n| {
+                    $( self.$reserve(cautious::<T>(_n)); )?
+                    move |r, _| {
+                        let mut v = T::default();
+                        v.read(r)?;
+                        self.insert(v);
+                        Ok(())
+                    }
                 })?;
                 Ok(())
             }
@@ -774,7 +790,7 @@ macro_rules! impl_read_set {
     )*}
 }
 impl_read_set!(
-    [+ Eq + Hash, S: BuildHasher + Default] HashSet<T, S>,
+    [+ Eq + Hash, S: BuildHasher + Default] HashSet<T, S>, reserve reserve,
     [+ Ord] BTreeSet<T>,
 );
 
@@ -813,17 +829,21 @@ impl_write_iter!(
 // Maps
 // ---------------------------------------------------------------------------
 
+/// A hashed map reserves on the member count; a tree has nothing to reserve.
 macro_rules! impl_map {
-    ($([$($kb:tt)*] [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty),* $(,)?) => {$(
+    ($([$($kb:tt)*] [$($rgen:tt)*] [$($wgen:tt)*] $ty:ty $(, reserve $reserve:ident)?),* $(,)?) => {$(
         impl<'de, K: FromBeveKey $($kb)*, V: Read<'de> + Default $($rgen)*> Read<'de> for $ty {
             fn read<O: Options>(&mut self, r: &mut Reader<'de, O>) -> PResult<()> {
                 self.clear();
-                r.read_map(|r, key| {
-                    let k = K::from_key(key)?;
-                    let mut v = V::default();
-                    v.read(r)?;
-                    self.insert(k, v);
-                    Ok(())
+                r.read_map_counted(|_n| {
+                    $( self.$reserve(cautious::<(K, V)>(_n)); )?
+                    move |r, key| {
+                        let k = K::from_key(key)?;
+                        let mut v = V::default();
+                        v.read(r)?;
+                        self.insert(k, v);
+                        Ok(())
+                    }
                 })
             }
         }
@@ -837,7 +857,7 @@ macro_rules! impl_map {
     )*}
 }
 impl_map!(
-    [+ Eq + Hash] [, S: BuildHasher + Default] [, S] HashMap<K, V, S>,
+    [+ Eq + Hash] [, S: BuildHasher + Default] [, S] HashMap<K, V, S>, reserve reserve,
     [+ Ord] [] [] BTreeMap<K, V>,
 );
 
@@ -1086,14 +1106,18 @@ macro_rules! impl_read_seq_as {
                     }
                 )?
                 let held = value.len();
-                let n = r.read_seq(|r, i| {
-                    if i < held {
-                        A::read(&mut value[i], r)
-                    } else {
-                        let mut v = T::default();
-                        A::read(&mut v, r)?;
-                        value.$push(v);
-                        Ok(())
+                let out = &mut *value;
+                let n = r.read_seq_counted(|n| {
+                    out.reserve(cautious::<T>(n).saturating_sub(held));
+                    move |r, i| {
+                        if i < held {
+                            A::read(&mut out[i], r)
+                        } else {
+                            let mut v = T::default();
+                            A::read(&mut v, r)?;
+                            out.$push(v);
+                            Ok(())
+                        }
                     }
                 })?;
                 value.truncate(n);
@@ -1126,18 +1150,21 @@ where
 
 /// A set has no positional storage to reuse, so it is emptied and refilled.
 macro_rules! impl_read_set_as {
-    ($([$($gen:tt)*] $self:ty, $target:ty);* $(;)?) => {$(
+    ($([$($gen:tt)*] $self:ty, $target:ty $(, reserve $reserve:ident)?);* $(;)?) => {$(
         impl<'de, A, T: Default $($gen)*> ReadAs<'de, $target> for $self
         where
             A: ReadAs<'de, T>,
         {
             fn read<O: Options>(value: &mut $target, r: &mut Reader<'de, O>) -> PResult<()> {
                 value.clear();
-                r.read_seq(|r, _| {
-                    let mut v = T::default();
-                    A::read(&mut v, r)?;
-                    value.insert(v);
-                    Ok(())
+                r.read_seq_counted(|_n| {
+                    $( value.$reserve(cautious::<T>(_n)); )?
+                    move |r, _| {
+                        let mut v = T::default();
+                        A::read(&mut v, r)?;
+                        value.insert(v);
+                        Ok(())
+                    }
                 })?;
                 Ok(())
             }
@@ -1145,7 +1172,7 @@ macro_rules! impl_read_set_as {
     )*}
 }
 impl_read_set_as!(
-    [+ Eq + Hash, S: BuildHasher + Default] HashSet<A>, HashSet<T, S>;
+    [+ Eq + Hash, S: BuildHasher + Default] HashSet<A>, HashSet<T, S>, reserve reserve;
     [+ Ord] BTreeSet<A>, BTreeSet<T>;
 );
 
@@ -1208,7 +1235,7 @@ impl<T: ToBeveKey + ?Sized> WriteKeyAs<T> for Same {
 /// adapter, since an adapter that turns a string key into an integer one has
 /// changed which kind of object this is.
 macro_rules! impl_map_as {
-    ($([$($kb:tt)*] [$($rgen:tt)*] [$($wgen:tt)*] $self:ty, $target:ty);* $(;)?) => {$(
+    ($([$($kb:tt)*] [$($rgen:tt)*] [$($wgen:tt)*] $self:ty, $target:ty $(, reserve $reserve:ident)?);* $(;)?) => {$(
         impl<'de, KA, VA, K $($kb)*, V: Default $($rgen)*> ReadAs<'de, $target> for $self
         where
             KA: ReadKeyAs<K>,
@@ -1216,12 +1243,15 @@ macro_rules! impl_map_as {
         {
             fn read<O: Options>(value: &mut $target, r: &mut Reader<'de, O>) -> PResult<()> {
                 value.clear();
-                r.read_map(|r, key| {
-                    let k = KA::from_key(key)?;
-                    let mut v = V::default();
-                    VA::read(&mut v, r)?;
-                    value.insert(k, v);
-                    Ok(())
+                r.read_map_counted(|_n| {
+                    $( value.$reserve(cautious::<(K, V)>(_n)); )?
+                    move |r, key| {
+                        let k = KA::from_key(key)?;
+                        let mut v = V::default();
+                        VA::read(&mut v, r)?;
+                        value.insert(k, v);
+                        Ok(())
+                    }
                 })
             }
         }
@@ -1239,6 +1269,6 @@ macro_rules! impl_map_as {
     )*}
 }
 impl_map_as!(
-    [: Eq + Hash] [, S: BuildHasher + Default] [, S] HashMap<KA, VA>, HashMap<K, V, S>;
+    [: Eq + Hash] [, S: BuildHasher + Default] [, S] HashMap<KA, VA>, HashMap<K, V, S>, reserve reserve;
     [: Ord] [] [] BTreeMap<KA, VA>, BTreeMap<K, V>;
 );

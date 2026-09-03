@@ -6,7 +6,7 @@
 
 **High-performance JSON and [BEVE](https://github.com/stephenberry/beve) for Rust structs.** No dependencies, no proc-macros, no intermediate representation.
 
-Values are read straight into your types and written straight out of them. There is no `Value` enum, no token stream, and no document model: a field's bytes are converted exactly once, into the member that will hold them.
+Values are read straight into your types and written straight out of them. There is no token stream and no intermediate document model: a field's bytes are converted exactly once, into the member that will hold them.
 
 Built in the spirit of [Glaze](https://github.com/stephenberry/glaze).
 
@@ -170,7 +170,7 @@ No comparison against `serde_json` has been run, so please do not infer one.
 
 ## What it does not do
 
-**Only statically known types.** There is no lazy or generic value type. If you need to reach into arbitrary documents from code, this is the wrong tool. Reading one is a different matter: `beve_to_json` turns any BEVE document into JSON without a schema.
+**Statically known types first.** A document you have no type for reads into `Value`, a plain tree with the accessors a tree needs, meant for the register map walked by path or the body forwarded unread. It is a destination, not a stage every read passes through, and anything you could declare a type for is better read into that type. `beve_to_json` turns any BEVE document into JSON without either.
 
 **No `json_to_beve`.** BEVE prefixes every container with its count and JSON gives that up only at the end, so the reverse of the above is not the same one-pass walk. JSON with a schema is `from_str::<T>` and then `to_beve`.
 
