@@ -201,10 +201,10 @@ struct Borrowed<'a> {
     name: &'a str,
 }
 
-structio::object!(['de] Borrowed<'de> { name });
+structio::object!(['a] Borrowed<'a> { name });
 ```
 
-The macro spots a leading `'de` in the bracket list and uses the list verbatim for both halves. Without one, it adds `'de` to the read impls and leaves the write impls alone, since a writer must not declare a lifetime it does not constrain.
+The macro takes a leading lifetime in the bracket list, under whatever name the struct gave it, as the lifetime of the input, and uses the list verbatim for both halves. Without one, it adds a `'de` to the read impls and leaves the write impls alone, since a writer must not declare a lifetime it does not constrain.
 
 ### One format only
 
@@ -217,7 +217,7 @@ struct Frame<'a> {
     payload: &'a [u8],
 }
 
-structio::beve_object!(['de] Frame<'de> { id, payload });
+structio::beve_object!(['a] Frame<'a> { id, payload });
 ```
 
 A borrowed `&[u8]` is the case that forces this: BEVE stores a run of bytes verbatim and can hand back a subslice, while JSON has no such representation, so there is no JSON impl to generate.

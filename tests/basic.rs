@@ -145,6 +145,29 @@ struct Borrowed<'a> {
 }
 structio::object!(['de] Borrowed<'de> { name, tag });
 
+/// The same declaration under the struct's own lifetime name. `'de` is what
+/// the read impls call the input lifetime, not a name the declaration has to
+/// use: the first lifetime in the bracket is taken as it comes.
+#[derive(Default, Debug, PartialEq)]
+struct Named<'a> {
+    name: &'a str,
+    tag: std::borrow::Cow<'a, str>,
+}
+structio::object!(['a] Named<'a> as "camelCase" { name, tag });
+
+#[test]
+fn a_borrowed_type_keeps_its_own_lifetime_name() {
+    let json = String::from(r#"{"name":"zero copy","tag":"plain"}"#);
+    let n: Named = from_str(&json).unwrap();
+    assert_eq!(n.name, "zero copy");
+    assert!(std::ptr::eq(n.name.as_ptr(), json[9..].as_ptr()));
+    assert_eq!(structio::to_string(&n), json);
+
+    let beve = structio::to_beve(&n);
+    let back: Named = structio::from_beve(&beve).unwrap();
+    assert_eq!(back, n);
+}
+
 #[test]
 fn borrowed_strings_do_not_copy() {
     let json = String::from(r#"{"name":"zero copy","tag":"plain"}"#);

@@ -548,6 +548,31 @@ enum Event<'a> {
 }
 structio::tagged_enum!(['de] Event<'de> as tag "kind" { Tick, Named(_) });
 
+/// The same enum under its own lifetime name, through the tag-clause arms.
+#[derive(Default, PartialEq, Debug)]
+enum NamedEvent<'a> {
+    #[default]
+    Tick,
+    Named(Borrowed<'a>),
+}
+structio::tagged_enum!(['a] NamedEvent<'a> as tag "kind" { Tick, Named(_) });
+
+#[test]
+fn a_tagged_payload_keeps_its_own_lifetime_name() {
+    let doc = r#"{"kind":"Named","name":"abc"}"#;
+    let e: NamedEvent<'_> = from_str(doc).unwrap();
+    let NamedEvent::Named(b) = e else {
+        panic!("expected Named")
+    };
+    assert_eq!(b.name, "abc");
+    let at = doc.find("abc").unwrap();
+    assert!(std::ptr::eq(b.name.as_ptr(), doc[at..].as_ptr()));
+
+    let beve = structio::to_beve(&NamedEvent::Named(Borrowed { name: "abc" }));
+    let back: NamedEvent<'_> = structio::from_beve(&beve).unwrap();
+    assert_eq!(back, NamedEvent::Named(Borrowed { name: "abc" }));
+}
+
 #[test]
 fn a_payload_may_borrow_from_the_document() {
     let doc = r#"{"kind":"Named","name":"abc"}"#;

@@ -6,6 +6,10 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ## [Unreleased]
 
+### Changed
+
+- **A borrowing type names its lifetime as it likes.** `object!(['a] Borrowed<'a> { .. })` now works, as do `array!`, `tagged_enum!` and their single-format forms: the first lifetime in the bracket is the input lifetime, whatever it is called. It had to be spelled `'de`, and any other name failed from inside the expansion with "lifetime may not live long enough" and no hint about why. Declarations written with `'de` are unchanged.
+
 ### Added
 
 - `json::MAX_DEPTH` and `beve::MAX_DEPTH`, the nesting limit each reader enforces, re-exported at the module root. They were reachable only through `json::parser` and `beve::reader`.

@@ -79,7 +79,7 @@ Both macros take a generics list in brackets, exactly as `object!` does:
 
 ```rust
 // A payload that borrows out of the document rather than copying from it.
-structio::tagged_enum!(['de] Ref<'de> { Nothing, Text(_) });
+structio::tagged_enum!(['a] Ref<'a> { Nothing, Text(_) });
 
 // A parameter with a bound.
 structio::tagged_enum!([T: structio::ReadWrite + Default] Message<T> { Ping, Data(_) });
