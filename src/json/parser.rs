@@ -714,20 +714,40 @@ impl<'de, O: Options> Parser<'de, O> {
     // Scalars
     // -----------------------------------------------------------------------
 
-    #[inline]
+    /// Read `true` or `false`.
+    ///
+    /// Without a branch on which it is. A column of bools is the one place a
+    /// branch on the value mispredicts on about every other element, and the
+    /// mispredict costs more than the whole compare. The first byte picks the
+    /// literal to expect, through selects rather than a branch, and the one
+    /// branch left is the compare against it, which is taken only for input
+    /// that is not a bool at all. Written with `|` on two compares instead,
+    /// the compiler turned the pair back into a branch on each, which put the
+    /// mispredict back with a bounds test on top.
+    ///
+    /// The test needs eight readable bytes; a literal ending within the last
+    /// seven bytes of the document, and anything that is not a literal, takes
+    /// the byte-at-a-time path.
+    #[inline(always)]
     pub fn read_bool(&mut self) -> PResult<bool> {
-        match self.peek() {
-            Some(b't') => {
-                self.expect_lit(b"true", ErrorCode::ExpectedTrue)?;
-                Ok(true)
+        use core::hint::select_unpredictable as select;
+        const TRUE: u64 = u64::from_le_bytes(*b"true\0\0\0\0");
+        const FALSE: u64 = u64::from_le_bytes(*b"false\0\0\0");
+        let i = self.idx;
+        if i + 8 <= self.data.len() {
+            // SAFETY: `i + 8 <= self.data.len()`.
+            let word = unsafe { load_u64(self.data, i) };
+            let is_f = word as u8 == b'f';
+            let want = select(is_f, FALSE, TRUE);
+            let mask = select(is_f, 0xFF_FFFF_FFFF, 0xFFFF_FFFF);
+            if word & mask == want {
+                self.idx = i + select(is_f, 5, 4);
+                return Ok(!is_f);
             }
-            Some(b'f') => {
-                self.expect_lit(b"false", ErrorCode::ExpectedFalse)?;
-                Ok(false)
-            }
-            Some(_) => Err(ErrorCode::UnexpectedCharacter),
-            None => Err(ErrorCode::UnexpectedEnd),
         }
+        let (value, end) = read_bool_slow(self.data, i)?;
+        self.idx = end;
+        Ok(value)
     }
 
     #[inline(always)]
@@ -773,12 +793,15 @@ impl<'de, O: Options> Parser<'de, O> {
         Ok(v)
     }
 
-    #[inline]
+    /// Always inlined, as [`read_u64`](Self::read_u64) is and for the same
+    /// reason. The float path is larger than the integer one, and left as a
+    /// hint it is the call an array of floats makes per element.
+    #[inline(always)]
     pub fn read_f64(&mut self) -> PResult<f64> {
         parse_float::<f64>(self.data, &mut self.idx)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn read_f32(&mut self) -> PResult<f32> {
         parse_float::<f32>(self.data, &mut self.idx)
     }
@@ -1295,6 +1318,28 @@ pub(crate) fn skip_ws_at<O: Options>(data: &[u8], at: usize) -> usize {
         }
     }
     i
+}
+
+/// [`Parser::read_bool`] for a literal within seven bytes of the end of the
+/// document, and for everything that is not one.
+///
+/// Takes the cursor and gives it back by value rather than borrowing the
+/// parser, because a `&mut Parser` handed to an out-of-line call makes the
+/// parser addressable, and an addressable parser keeps its cursor on the
+/// stack for the whole of the array loop the call sits in. Cold, so that the
+/// two literals' error paths stay out of that loop.
+#[cold]
+#[inline(never)]
+fn read_bool_slow(data: &[u8], idx: usize) -> PResult<(bool, usize)> {
+    let rest = &data[idx.min(data.len())..];
+    match rest.first() {
+        Some(b't') if rest.starts_with(b"true") => Ok((true, idx + 4)),
+        Some(b't') => Err(ErrorCode::ExpectedTrue),
+        Some(b'f') if rest.starts_with(b"false") => Ok((false, idx + 5)),
+        Some(b'f') => Err(ErrorCode::ExpectedFalse),
+        Some(_) => Err(ErrorCode::UnexpectedCharacter),
+        None => Err(ErrorCode::UnexpectedEnd),
+    }
 }
 
 /// Step over one comment, `data[at]` being its `/`.

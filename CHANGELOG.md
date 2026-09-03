@@ -6,6 +6,10 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ## [Unreleased]
 
+### Changed
+
+- **Faster JSON reading and string writing.** Against Glaze on the benchmark documents, reading doubles went from 58% to 87% of its speed, mixed documents from 78% to over 100%, and signed integers, bools and strings moved up with them; string writing went from 91% to 94%. The float reader is now inlined into the array loop rather than called per element, out-of-line helpers no longer pin the parser's cursor to the stack, signs and bools are read without a branch on the data, digits are folded a word at a time rather than one at a time, integers of up to fifteen digits stay on the inlined path, and strings are copied as they are scanned. [docs/performance.md](docs/performance.md) has the measurements and the mechanisms. Output and accepted input are unchanged, and the float scanner is checked bit for bit against the standard library on 200,000 generated literals.
+
 ## [0.3.1] - 2026-09-03
 
 ### Changed

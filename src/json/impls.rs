@@ -410,6 +410,12 @@ impl_write_deref!(Box<T>, Rc<T>, Arc<T>, &T);
 
 /// Read over elements that are already here before growing, so a sequence of
 /// `String` reuses every buffer it is holding.
+///
+/// An element past what was held is pushed as a default first and then read
+/// in place, the same way as one that was already here, so the element read
+/// has one call site rather than two. That halves what the compiler is asked
+/// to inline into this loop, and for a scalar element it is the difference
+/// between the conversion sitting in the loop and a call per element.
 macro_rules! impl_read_seq {
     ($($ty:ident: $push:ident),* $(,)?) => {$(
         impl<'de, T: Read<'de> + Default> Read<'de> for $ty<T> {
@@ -417,14 +423,10 @@ macro_rules! impl_read_seq {
             fn read<O: Options>(&mut self, p: &mut Parser<'de, O>) -> PResult<()> {
                 let held = self.len();
                 let n = p.read_seq(|p, i| {
-                    if i < held {
-                        self[i].read(p)
-                    } else {
-                        let mut v = T::default();
-                        v.read(p)?;
-                        self.$push(v);
-                        Ok(())
+                    if i >= held {
+                        self.$push(T::default());
                     }
+                    self[i].read(p)
                 })?;
                 self.truncate(n);
                 Ok(())
@@ -762,14 +764,10 @@ macro_rules! impl_read_seq_as {
             fn read<O: Options>(value: &mut $ty<T>, p: &mut Parser<'de, O>) -> PResult<()> {
                 let held = value.len();
                 let n = p.read_seq(|p, i| {
-                    if i < held {
-                        A::read(&mut value[i], p)
-                    } else {
-                        let mut v = T::default();
-                        A::read(&mut v, p)?;
-                        value.$push(v);
-                        Ok(())
+                    if i >= held {
+                        value.$push(T::default());
                     }
+                    A::read(&mut value[i], p)
                 })?;
                 value.truncate(n);
                 Ok(())
