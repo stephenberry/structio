@@ -6,6 +6,15 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ## [Unreleased]
 
+### Changed
+
+- **An internally tagged enum's tag no longer has to come first.** `tagged_enum!(.. as tag "kind")` used to refuse an object whose first member was not the tag with `ExpectedTag`, which refused every document from a sorted-key writer the moment a member sorted before the tag. The reader now steps over the members before the tag, dispatches on it, reads the members after it, and then reads the ones it stepped over, nesting as deep as the payloads do. A tag that is first still costs one pass; the members before a late tag are walked twice, and a key on both sides of the tag keeps its earlier value. Required-field and unknown-key rules apply to the deferred members as to any other. An object with no tag at all is still `ExpectedTag`, reported against its first key.
+
+### Added
+
+- **BEVE containers reserve on the wire count.** `Reader::read_seq_counted` and `read_map_counted` hand the element count to the caller before the first element, clipped to what the input could hold, and `beve::cautious::<T>` clips it again to a megabyte of `T`. `Vec`, `VecDeque`, `HashMap` and `HashSet`, adapted or not, reserve once instead of doubling up; a hostile count can waste at most that megabyte.
+- **`Value`, a tree for a value with no declared type.** Null, bool, number, string, array, object, with `get`, `pointer`/`pointer_mut`, the `as_*`/`is_*` accessors, `Index`/`IndexMut` by key or position, and the `value!` macro to build one. It reads and writes through both formats like any other type, so it can be a field of an `object!` declaration or a whole document; a BEVE typed array, complex run or matrix reads into the same shape `beve_to_json` writes. `Number` keeps whether it was an unsigned integer, a negative integer or a float, and writes a whole-valued float as `1.0` so the kind survives a trip through text. `to_value` and `from_value` move a declared type in and out, through JSON text. This is for the value nothing decodes, a register tree walked by path or a body forwarded unread, not a substitute for a declared type, and the crate's stance on that is unchanged.
+
 ## [0.3.2] - 2026-09-03
 
 ### Changed

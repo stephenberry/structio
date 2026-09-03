@@ -219,18 +219,16 @@ structio::tagged_enum!(Shape as tag "kind" { Empty, Circle(_) });
 
 This is the convention most JSON APIs settled on, and the one a C++ Glaze `std::variant` with a declared tag produces. It is the only form here that a deduced variant can be made to agree with: external tagging has nowhere to put the payload's own keys.
 
-### The tag has to come first
+### The tag need not come first
 
-**A document whose object begins with any other key is `ExpectedTag`.** This crate reads in one pass with no lookahead and no buffering, so the member deciding which variant is being read has to arrive before the members whose meaning it decides. Finding a tag further in means holding the object somewhere or walking it twice, and neither is a thing this crate does.
-
-The restriction is on reading. Writing always puts the tag first, so a value this crate wrote reads back unconditionally, and so does one from any producer that emits its tag first — the conventional ordering, and what a declaration-ordered serializer does by default. A producer that puts it last is refused, loudly and with the offending key's position, rather than misread:
+A tag that comes first is read in one pass, the member deciding the variant arriving before the members whose meaning it decides. A tag that comes later is found by stepping over the members before it; the variant is dispatched, the members after the tag are read, and then the ones stepped over are read into the same value. A document whose keys were sorted, which is what a map-backed writer produces, therefore reads the same as one that put the tag first:
 
 ```rust
-from_str::<Shape>(r#"{"kind":"Circle","radius":1}"#)?;  // reads
-from_str::<Shape>(r#"{"radius":1,"kind":"Circle"}"#);   // ExpectedTag, at "radius"
+from_str::<Shape>(r#"{"kind":"Circle","radius":1}"#)?;  // one pass
+from_str::<Shape>(r#"{"radius":1,"kind":"Circle"}"#)?;  // the same value
 ```
 
-`ExpectedTag` also covers an object with no members and a tag whose value is not a string. Which of the three it was is not distinguished, because distinguishing them is the search being refused. A tag that *is* first and names nothing is `UnknownVariant` instead: it was found, and its value is not a variant.
+The members before the tag meet the reader's policy exactly as the ones after it do: an unknown one is refused under `Standard` and stepped over under `SkipUnknown`, and a required one counts as seen. They are walked twice, once to step over them and once to read them, so a late tag costs more than a leading one by the size of what precedes it. Because they are read last, a key that appears on both sides of the tag keeps its earlier value, where the tag-first form keeps the later. A payload member that is itself an internally tagged enum with a late tag is handled the same way, nested as deep as the payloads go. An object with no tag anywhere is `ExpectedTag`, reported against its first key; so is an object with no members, and a tag whose value is not a string. A tag that names nothing is `UnknownVariant` instead: it was found, and its value is not a variant.
 
 ### What a payload may be
 

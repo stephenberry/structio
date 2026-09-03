@@ -36,9 +36,28 @@ pub struct Parser<'de, O: Options = Standard> {
     /// The key to attach to the failure this parse is about to return. See
     /// [`set_error_key`](Parser::set_error_key).
     error_key: Option<&'static str>,
+    /// Members of internally tagged objects that came before their tag, to
+    /// be read once the ones after it are: a stack, since an object whose tag
+    /// is late can hold a member whose tag is late too. Empty, and never
+    /// allocated, until a late tag is found. See
+    /// [`read_internally_tagged`](Parser::read_internally_tagged).
+    deferred: Vec<Deferred>,
     /// `fn() -> O` rather than `O`, so the parser's auto traits follow what it
     /// actually holds rather than a policy type it never contains.
     options: PhantomData<fn() -> O>,
+}
+
+/// The members between an object's first key and a tag that was not it.
+///
+/// `start` is the first key's opening quote and `end` the tag's, so the run
+/// is read by starting at one and stopping on reaching the other. `depth` is
+/// the object's own, which is what tells its payload reader the run is its to
+/// take rather than some enclosing object's.
+#[derive(Clone, Copy)]
+struct Deferred {
+    start: usize,
+    end: usize,
+    depth: u32,
 }
 
 impl<'de> Parser<'de> {
@@ -84,6 +103,7 @@ impl<'de, O: Options> Parser<'de, O> {
             idx: 0,
             depth: 0,
             error_key: None,
+            deferred: Vec::new(),
             options: PhantomData,
         }
     }
@@ -368,11 +388,14 @@ impl<'de, O: Options> Parser<'de, O> {
         value: &mut T,
         open: usize,
     ) -> PResult<()> {
-        let seen = if self.comma_or_close(b'}')? {
+        let mut seen = if self.comma_or_close(b'}')? {
             self.object_members::<T>(value)?
         } else {
             0
         };
+        if let Some(run) = self.take_deferred() {
+            seen |= self.deferred_members::<T>(value, run)?;
+        }
         self.leave();
         self.require_fields::<T>(seen, open)
     }
@@ -391,6 +414,22 @@ impl<'de, O: Options> Parser<'de, O> {
                 return self.unknown_key();
             }
             self.skip_unknown_member()?;
+        }
+        if let Some(run) = self.take_deferred() {
+            // Members before the tag are unknown ones too.
+            let resume = self.idx;
+            self.idx = run.start;
+            while self.idx != run.end {
+                self.expect(b'"', ErrorCode::ExpectedQuote)?;
+                if O::ERROR_ON_UNKNOWN_KEYS {
+                    return self.unknown_key();
+                }
+                self.skip_unknown_member()?;
+                if !self.comma_or_close(b'}')? {
+                    return Err(ErrorCode::ExpectedTag);
+                }
+            }
+            self.idx = resume;
         }
         self.leave();
         Ok(())
@@ -421,35 +460,105 @@ impl<'de, O: Options> Parser<'de, O> {
     /// [`require_fields`](Self::require_fields) to run after it.
     #[inline]
     fn object_members<T: ReadObject<'de>>(&mut self, value: &mut T) -> PResult<u64> {
-        let map = T::MAP;
-        let n = map.n as usize;
-        // One bit per field filled, compared once the object ends against the
-        // fields that had to be there. Never written, and so never read, unless
-        // the policy or the type asks for one.
         let mut seen = 0u64;
-
         loop {
-            self.expect(b'"', ErrorCode::ExpectedQuote)?;
-
-            let index = map.lookup(T::KEYS, self.rest());
-            let matched = if index < n {
-                T::read_field(value, index, self)?
-            } else {
-                false
-            };
-            if Fields::<O, T>::TRACK && matched {
-                seen |= Fields::<O, T>::seen(index);
-            }
-            if !matched {
-                if O::ERROR_ON_UNKNOWN_KEYS {
-                    return self.unknown_key().map(|()| 0);
-                }
-                self.skip_unknown_member()?;
-            }
-
+            self.object_member::<T>(value, &mut seen)?;
             if !self.comma_or_close(b'}')? {
                 return Ok(seen);
             }
+        }
+    }
+
+    /// One member, the cursor sitting on its opening quote: hash the key to a
+    /// candidate index, let the generated dispatch confirm it and parse the
+    /// value, and note the field in `seen` if it was one.
+    #[inline]
+    fn object_member<T: ReadObject<'de>>(&mut self, value: &mut T, seen: &mut u64) -> PResult<()> {
+        let map = T::MAP;
+        let n = map.n as usize;
+        self.expect(b'"', ErrorCode::ExpectedQuote)?;
+
+        let index = map.lookup(T::KEYS, self.rest());
+        let matched = if index < n {
+            T::read_field(value, index, self)?
+        } else {
+            false
+        };
+        if Fields::<O, T>::TRACK && matched {
+            *seen |= Fields::<O, T>::seen(index);
+        }
+        if !matched {
+            if O::ERROR_ON_UNKNOWN_KEYS {
+                return self.unknown_key();
+            }
+            self.skip_unknown_member()?;
+        }
+        Ok(())
+    }
+
+    /// The members a late tag pushed aside, read into the same value once the
+    /// members after the tag are done.
+    ///
+    /// The cursor is past the object's closing brace and goes back there
+    /// afterwards. The run ends at the tag's key, which is the one member of
+    /// the object that was already consumed, so a comma always follows the
+    /// last member read here.
+    fn deferred_members<T: ReadObject<'de>>(
+        &mut self,
+        value: &mut T,
+        run: Deferred,
+    ) -> PResult<u64> {
+        let resume = self.idx;
+        self.idx = run.start;
+        let mut seen = 0u64;
+        while self.idx != run.end {
+            self.object_member::<T>(value, &mut seen)?;
+            if !self.comma_or_close(b'}')? {
+                return Err(ErrorCode::ExpectedTag);
+            }
+        }
+        self.idx = resume;
+        Ok(seen)
+    }
+
+    /// The deferred run, if it is this object's to read.
+    ///
+    /// The innermost run is the top of the stack, and only the object that
+    /// pushed it is at its depth when the payload ends, so a depth match is
+    /// ownership.
+    #[inline(always)]
+    fn take_deferred(&mut self) -> Option<Deferred> {
+        match self.deferred.last() {
+            Some(run) if run.depth == self.depth => self.deferred.pop(),
+            _ => None,
+        }
+    }
+
+    /// Scan an object whose first key was not the tag for the member that is,
+    /// leaving the cursor on the tag's value and noting where the members it
+    /// stepped over begin and end.
+    ///
+    /// The cursor starts at `first`, the first key's opening quote. A tag no
+    /// member carries is [`ErrorCode::ExpectedTag`] against that first key.
+    fn find_late_tag(&mut self, tag: &'static str, first: usize) -> PResult<()> {
+        let mut at = first;
+        loop {
+            self.idx = at;
+            self.expect(b'"', ErrorCode::ExpectedQuote)?;
+            if self.match_key(tag) {
+                self.deferred.push(Deferred {
+                    start: first,
+                    end: at,
+                    depth: self.depth,
+                });
+                return Ok(());
+            }
+            self.skip_unknown_member()?;
+            if !self.comma_or_close(b'}')? {
+                self.idx = first;
+                return Err(ErrorCode::ExpectedTag);
+            }
+            at = self.idx;
         }
     }
 
@@ -571,18 +680,23 @@ impl<'de, O: Options> Parser<'de, O> {
     /// `tagged_enum!(.. as tag "..")`.
     ///
     /// One form rather than [`read_enum`](Self::read_enum)'s two: an object
-    /// whose first member is the tag naming the variant, and whose remaining
+    /// one of whose members is the tag naming the variant, and whose other
     /// members are that variant's own fields.
     ///
-    /// **The tag has to come first.** This crate reads in one pass, and a tag
-    /// arriving after the members it gives meaning to could only be used by
-    /// holding the object somewhere or by walking it twice. An object that
-    /// begins with any other key is [`ErrorCode::ExpectedTag`], reported
-    /// against that key, rather than searched for a tag further in.
+    /// A tag that comes first costs one pass. One that comes later is found
+    /// by stepping over the members before it, which are then read after the
+    /// members that follow it, so a document whose keys were sorted (as a
+    /// document built from a map is) reads the same as one that put the tag
+    /// first. The members before the tag are walked twice, once to step over
+    /// them and once to read them, and because they are read last, a key
+    /// that appears both before and after the tag keeps the earlier value
+    /// where the tag-first form keeps the later. A payload member that is
+    /// itself tagged late stacks its own run on this one. An object with no
+    /// tag at all is [`ErrorCode::ExpectedTag`], reported against its first
+    /// key.
     ///
-    /// A tag that is first and names no variant is
-    /// [`ErrorCode::UnknownVariant`] under every policy, for the reason
-    /// [`read_enum`](Self::read_enum) gives.
+    /// A tag that names no variant is [`ErrorCode::UnknownVariant`] under
+    /// every policy, for the reason [`read_enum`](Self::read_enum) gives.
     pub fn read_internally_tagged<T: ReadInternallyTagged<'de>>(
         &mut self,
         value: &mut T,
@@ -607,13 +721,7 @@ impl<'de, O: Options> Parser<'de, O> {
         let first = self.idx;
         self.expect(b'"', ErrorCode::ExpectedQuote)?;
         if !self.match_key(T::TAG) {
-            // `match_key` fails identically for a key that differs and for one
-            // the input ended in the middle of, so walk it first: a document
-            // that ended is not a document that put its tag in the wrong
-            // place, and the two must not be reported alike.
-            self.skip_string_body()?;
-            self.idx = first;
-            return Err(ErrorCode::ExpectedTag);
+            self.find_late_tag(T::TAG, first)?;
         }
         self.colon()?;
         // The tag's value names the variant, so it is a string or it is

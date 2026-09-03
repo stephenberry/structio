@@ -1,11 +1,10 @@
 //! Internally tagged enums, in both formats.
 //!
-//! One wire form and no second: an object whose first member is the tag naming
-//! the variant, and whose remaining members are that variant's own. What is
-//! checked here is that both formats agree, that a round trip is exact, and
-//! above all that the tag has to come *first* — the restriction that lets this
-//! be read in one pass, and the reason a late tag is an error rather than a
-//! misparse.
+//! One wire form and no second: an object one of whose members is the tag
+//! naming the variant, the rest being that variant's own. What is checked here
+//! is that both formats agree, that a round trip is exact, and that a tag
+//! which does not come first is found by stepping over the members before it,
+//! which are then read after the ones that follow it.
 
 use structio::{
     ErrorCode, Pretty, RequireKeys, SkipNull, SkipUnknown, from_beve, from_str, to_beve, to_string,
@@ -95,26 +94,22 @@ fn the_two_formats_agree_on_which_variant_a_document_names() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn a_late_tag_is_refused_rather_than_searched_for() {
-    // The whole restriction, in both formats. These documents are valid JSON
-    // and valid BEVE, describe the same value as the accepted ones, and are
-    // refused anyway: finding the tag would mean a second pass.
-    let err = from_str::<Shape>(r#"{"radius":1.5,"kind":"Circle"}"#).unwrap_err();
-    assert_eq!(err.code, ErrorCode::ExpectedTag);
-
-    // The same in BEVE, written by a struct whose members are declared in the
-    // other order. A real encoder's output rather than spliced bytes, so what
-    // is refused is a document another implementation could genuinely produce.
+fn a_late_tag_is_found_and_the_members_before_it_are_read() {
+    // Valid documents that put the tag after a member: what a sorted-key
+    // writer produces. Both formats read them to the same value as the
+    // tag-first form.
+    assert_eq!(
+        from_str::<Shape>(r#"{"radius":1.5,"kind":"Circle"}"#).unwrap(),
+        Shape::Circle(Circle { radius: 1.5 })
+    );
     let reordered = to_beve(&LateTag {
         radius: 1.5,
         kind: "Circle".into(),
     });
     assert_eq!(
-        from_beve::<Shape>(&reordered).unwrap_err().code,
-        ErrorCode::ExpectedTag
+        from_beve::<Shape>(&reordered).unwrap(),
+        Shape::Circle(Circle { radius: 1.5 })
     );
-    // And the same bytes with the members declared the other way round do read,
-    // which is what says the refusal is about order and nothing else.
     assert_eq!(
         from_beve::<Shape>(&to_beve(&EarlyTag {
             kind: "Circle".into(),
@@ -122,6 +117,53 @@ fn a_late_tag_is_refused_rather_than_searched_for() {
         }))
         .unwrap(),
         Shape::Circle(Circle { radius: 1.5 })
+    );
+
+    // A tag in the middle: members on both sides of it are read, and a
+    // unit variant tolerates members around its tag under `SkipUnknown`.
+    let middle = structio::value!({"a": 1, "kind": "Circle", "radius": 2.5});
+    assert_eq!(
+        structio::from_value_with::<structio::SkipUnknown, Shape>(&middle).unwrap(),
+        Shape::Circle(Circle { radius: 2.5 })
+    );
+    assert_eq!(
+        structio::from_str_with::<structio::SkipUnknown, Shape>(
+            r#"{"x":[1,{"kind":"y"}],"kind":"Empty","z":null}"#
+        )
+        .unwrap(),
+        Shape::Empty
+    );
+    assert_eq!(
+        structio::from_beve_with::<structio::SkipUnknown, Shape>(&structio::to_beve(&middle))
+            .unwrap(),
+        Shape::Circle(Circle { radius: 2.5 })
+    );
+
+    // Members before the tag still meet the policy: under `Standard` an
+    // unknown one is refused, and a required one that is missing is missed.
+    assert_eq!(
+        from_str::<Shape>(r#"{"a":1,"kind":"Circle","radius":2.5}"#)
+            .unwrap_err()
+            .code,
+        ErrorCode::UnknownKey
+    );
+    assert_eq!(
+        from_str::<Shape>(r#"{"a":1,"kind":"Empty"}"#)
+            .unwrap_err()
+            .code,
+        ErrorCode::UnknownKey
+    );
+
+    // No tag anywhere is still `ExpectedTag`, against the first key.
+    assert_eq!(
+        from_str::<Shape>(r#"{"radius":1.5}"#).unwrap_err().code,
+        ErrorCode::ExpectedTag
+    );
+    assert_eq!(
+        from_beve::<Shape>(&to_beve(&structio::value!({"radius": 1.5})))
+            .unwrap_err()
+            .code,
+        ErrorCode::ExpectedTag
     );
 }
 
@@ -139,12 +181,66 @@ struct EarlyTag {
 }
 structio::object!(EarlyTag { kind, radius });
 
+#[derive(Default, PartialEq, Debug)]
+struct Frame {
+    // `a` sorts before the tag and `z` after it, so a sorted-key writer puts
+    // the shape, whose own tag is late, on the far side of this tag.
+    a: u32,
+    z: Shape,
+}
+structio::object!(Frame { a, z });
+
+#[derive(PartialEq, Debug)]
+enum Framed {
+    Frame(Frame),
+}
+impl Default for Framed {
+    fn default() -> Self {
+        Framed::Frame(Frame::default())
+    }
+}
+structio::tagged_enum!(Framed as tag "kind" { Frame(_) });
+
 #[test]
-fn a_late_tag_is_reported_against_the_key_that_was_there_instead() {
-    // The error has to be actionable, which means naming the member that broke
-    // the rule rather than the object or the end of it.
-    let err = from_str::<Shape>(r#"{"radius":1.5,"kind":"Circle"}"#).unwrap_err();
-    assert_eq!(err.index, 1, "the offending key's opening quote");
+fn a_late_tag_inside_a_late_tag_loses_nothing() {
+    // Each object's members before its tag are held while the payload is
+    // read, and the payload holds an object in the same state. The outer
+    // run has to survive the inner one being found and read.
+    let want = Framed::Frame(Frame {
+        a: 1,
+        z: Shape::Circle(Circle { radius: 2.5 }),
+    });
+    let sorted =
+        structio::value!({"a": 1, "kind": "Frame", "z": {"kind": "Circle", "radius": 2.5}});
+    assert_eq!(
+        sorted.to_string(),
+        r#"{"a":1,"kind":"Frame","z":{"kind":"Circle","radius":2.5}}"#
+    );
+    assert_eq!(from_str::<Framed>(&sorted.to_string()).unwrap(), want);
+    assert_eq!(from_beve::<Framed>(&sorted.to_beve()).unwrap(), want);
+    // The inner tag late as well.
+    let text = r#"{"a":1,"kind":"Frame","z":{"radius":2.5,"kind":"Circle"}}"#;
+    assert_eq!(from_str::<Framed>(text).unwrap(), want);
+    let inner_late =
+        structio::value!({"a": 1, "kind": "Frame", "z": {"radius": 2.5, "kind": "Circle"}});
+    assert_eq!(from_beve::<Framed>(&inner_late.to_beve()).unwrap(), want);
+    // Three deep, every tag last.
+    let text = r#"{"a":1,"z":{"radius":2.5,"kind":"Circle"},"kind":"Frame"}"#;
+    assert_eq!(from_str::<Framed>(text).unwrap(), want);
+}
+
+#[test]
+fn a_key_on_both_sides_of_a_late_tag_keeps_the_earlier_value() {
+    // The members before the tag are read last, so the earlier duplicate
+    // overwrites the later one; with the tag first, the later one wins.
+    assert_eq!(
+        from_str::<Shape>(r#"{"radius":1,"kind":"Circle","radius":2}"#).unwrap(),
+        Shape::Circle(Circle { radius: 1.0 })
+    );
+    assert_eq!(
+        from_str::<Shape>(r#"{"kind":"Circle","radius":1,"radius":2}"#).unwrap(),
+        Shape::Circle(Circle { radius: 2.0 })
+    );
 }
 
 #[test]

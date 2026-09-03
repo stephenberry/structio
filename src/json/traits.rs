@@ -282,8 +282,7 @@ pub trait ReadEnum<'de>: Variants + Sized {
 /// [`read_variant`](Self::read_variant) is the variant name and the rest of an
 /// object still to be read.
 pub trait ReadInternallyTagged<'de>: Variants + Sized {
-    /// The key that carries the variant name, and which every document must
-    /// put first.
+    /// The key that carries the variant name.
     const TAG: &'static str;
 
     /// Take variant `index`, the cursor sitting on the first byte of the tag's

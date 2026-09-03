@@ -1404,21 +1404,14 @@ macro_rules! __beve_array_body {
 /// # assert_eq!(structio::to_string(&Op::Noop), r#"{"op":"noop"}"#);
 /// ```
 ///
-/// ## The tag has to come first
+/// ## The tag need not come first
 ///
-/// **A document whose object begins with any other key is
-/// [`ExpectedTag`](crate::ErrorCode::ExpectedTag).** This crate reads in one
-/// pass with no lookahead and no buffering, so the member that decides which
-/// variant is being read has to arrive before the members whose meaning it
-/// decides. Finding a tag further in means holding the object somewhere or
-/// walking it twice, and neither is a thing this crate does.
-///
-/// The restriction is on *reading*. Writing always puts the tag first, so a
-/// value written by this crate reads back unconditionally, and so does one
-/// from any producer that emits its tag first, which is the conventional
-/// ordering and what a declaration-ordered serializer does by default. A
-/// producer that puts it last is refused, loudly and with the offending key's
-/// position, rather than misread.
+/// A tag that comes first is read in one pass. One that comes later is
+/// found by stepping over the members before it, which are read once the
+/// members after it are, so a document whose keys were sorted reads the same
+/// as one that put the tag first. An object with no tag at all is
+/// [`ExpectedTag`](crate::ErrorCode::ExpectedTag), reported against its
+/// first key.
 ///
 /// ```
 /// # #[derive(Default, PartialEq, Debug)]
@@ -1435,7 +1428,12 @@ macro_rules! __beve_array_body {
 /// );
 /// // The same members, the tag last.
 /// assert_eq!(
-///     from_str::<Shape>(r#"{"r":1,"kind":"Circle"}"#).unwrap_err().code,
+///     from_str::<Shape>(r#"{"r":1,"kind":"Circle"}"#).unwrap(),
+///     Shape::Circle(Circle { r: 1.0 }),
+/// );
+/// // No tag anywhere.
+/// assert_eq!(
+///     from_str::<Shape>(r#"{"r":1}"#).unwrap_err().code,
 ///     ErrorCode::ExpectedTag,
 /// );
 /// ```

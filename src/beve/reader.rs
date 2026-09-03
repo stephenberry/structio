@@ -60,6 +60,39 @@ pub enum Key<'de> {
     Unsigned(u128),
 }
 
+/// The members between an object's first key and a tag that was not it:
+/// `count` of them starting at `start`, belonging to the object at `depth`.
+#[derive(Clone, Copy)]
+struct Deferred {
+    start: usize,
+    count: usize,
+    depth: u32,
+}
+
+/// The most memory a reservation made on a count from the wire may claim
+/// before the elements have been read. A count the input can hold is still
+/// only a count: a hostile document one megabyte long can claim a million
+/// elements of a type that is a kilobyte each.
+const RESERVE_LIMIT: usize = 1 << 20;
+
+/// How many `T` to reserve on a count of `n` from the wire.
+///
+/// The count a [`read_seq_counted`](Reader::read_seq_counted) or
+/// [`read_map_counted`](Reader::read_map_counted) hands over is bounded
+/// by the bytes the input has left, which bounds how many elements it can
+/// hold but not what each costs in memory. This clips it so that no more than
+/// a megabyte is reserved on the count's word; an honest document of that
+/// many elements grows from there in the ordinary way, and a dishonest one is
+/// found out having wasted at most that. A zero-sized `T` costs nothing to
+/// reserve and is passed through.
+#[inline]
+pub fn cautious<T>(n: usize) -> usize {
+    match core::mem::size_of::<T>() {
+        0 => n,
+        w => n.min(RESERVE_LIMIT / w),
+    }
+}
+
 /// Which of the three shapes a typed array's payload has, with its preamble
 /// already consumed.
 ///
@@ -100,6 +133,12 @@ pub struct Reader<'de, O: Options = Standard> {
     /// The header the next value must be read with, when it carries none of
     /// its own. See the module docs.
     implied: Option<u8>,
+    /// Members of internally tagged objects that came before their tag, to
+    /// be read once the ones after it are: a stack, since an object whose tag
+    /// is late can hold a member whose tag is late too. Empty, and never
+    /// allocated, until a late tag is found. See
+    /// [`read_internally_tagged`](Reader::read_internally_tagged).
+    deferred: Vec<Deferred>,
     /// `fn() -> O` rather than `O`, so the reader's auto traits follow what it
     /// actually holds rather than a policy type it never contains.
     options: PhantomData<fn() -> O>,
@@ -141,6 +180,7 @@ impl<'de, O: Options> Reader<'de, O> {
             pos: 0,
             depth: 0,
             error_key: None,
+            deferred: Vec::new(),
             implied: None,
             options: PhantomData,
         }
@@ -161,6 +201,7 @@ impl<'de, O: Options> Reader<'de, O> {
             pos: 0,
             depth: 0,
             error_key: None,
+            deferred: Vec::new(),
             implied: Some(implied),
             options: PhantomData,
         }
@@ -170,6 +211,20 @@ impl<'de, O: Options> Reader<'de, O> {
     #[inline]
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    /// Bytes not yet read. Every element of an array and every member of an
+    /// object costs at least one of them, so this bounds how many a count off
+    /// the wire can honestly claim.
+    #[inline]
+    pub(crate) fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    /// A count off the wire, clipped to what the input could hold.
+    #[inline]
+    fn honest(&self, n: usize) -> usize {
+        n.min(self.remaining())
     }
 
     /// The key set for the failure being returned, if there is one.
@@ -714,31 +769,20 @@ impl<'de, O: Options> Reader<'de, O> {
         remaining: usize,
         open: usize,
     ) -> PResult<()> {
-        let map = T::MAP;
-        let fields = map.n as usize;
         // One bit per field filled, compared once the object ends against the
         // fields that had to be there. Never written, and so never read, unless
         // the policy or the type asks for one.
         let mut seen = 0u64;
         for _ in 0..remaining {
-            let n = self.count()?;
-            // Where the key's bytes begin, so a refusal can point at them
-            // rather than at the value they introduced. Dead, and gone, under
-            // a policy that cannot refuse.
-            let at = self.pos;
-            let key = self.take(n)?;
-            let index = map.lookup_sized(T::KEYS, key);
-            let matched = index < fields && T::read_field(value, index, key, self)?;
-            if Fields::<O, T>::TRACK && matched {
-                seen |= Fields::<O, T>::seen(index);
+            self.object_member::<T>(value, &mut seen)?;
+        }
+        if let Some(run) = self.take_deferred() {
+            let resume = self.pos;
+            self.pos = run.start;
+            for _ in 0..run.count {
+                self.object_member::<T>(value, &mut seen)?;
             }
-            if !matched {
-                if O::ERROR_ON_UNKNOWN_KEYS {
-                    self.pos = at;
-                    return Err(ErrorCode::UnknownKey);
-                }
-                self.skip_value()?;
-            }
+            self.pos = resume;
         }
 
         self.leave();
@@ -755,6 +799,47 @@ impl<'de, O: Options> Reader<'de, O> {
         Ok(())
     }
 
+    /// One member, the cursor sitting on its key: look the key up, let the
+    /// generated dispatch confirm it and read the value, and note the field
+    /// in `seen` if it was one.
+    #[inline]
+    fn object_member<T: ReadObject<'de>>(&mut self, value: &mut T, seen: &mut u64) -> PResult<()> {
+        let map = T::MAP;
+        let fields = map.n as usize;
+        let n = self.count()?;
+        // Where the key's bytes begin, so a refusal can point at them rather
+        // than at the value they introduced. Dead, and gone, under a policy
+        // that cannot refuse.
+        let at = self.pos;
+        let key = self.take(n)?;
+        let index = map.lookup_sized(T::KEYS, key);
+        let matched = index < fields && T::read_field(value, index, key, self)?;
+        if Fields::<O, T>::TRACK && matched {
+            *seen |= Fields::<O, T>::seen(index);
+        }
+        if !matched {
+            if O::ERROR_ON_UNKNOWN_KEYS {
+                self.pos = at;
+                return Err(ErrorCode::UnknownKey);
+            }
+            self.skip_value()?;
+        }
+        Ok(())
+    }
+
+    /// The deferred run, if it is this object's to read.
+    ///
+    /// The innermost run is the top of the stack, and only the object that
+    /// pushed it is at its depth when the payload ends, so a depth match is
+    /// ownership.
+    #[inline(always)]
+    fn take_deferred(&mut self) -> Option<Deferred> {
+        match self.deferred.last() {
+            Some(run) if run.depth == self.depth => self.deferred.pop(),
+            _ => None,
+        }
+    }
+
     /// Consume `remaining` members of an object with no fields to fill: the
     /// form an internally tagged variant carrying nothing takes.
     ///
@@ -763,17 +848,30 @@ impl<'de, O: Options> Reader<'de, O> {
     /// is balanced here.
     pub fn finish_internally_tagged(&mut self, remaining: usize) -> PResult<()> {
         for _ in 0..remaining {
-            let n = self.count()?;
-            let at = self.pos;
-            self.take(n)?;
-            if O::ERROR_ON_UNKNOWN_KEYS {
-                self.pos = at;
-                return Err(ErrorCode::UnknownKey);
+            self.unknown_member()?;
+        }
+        if let Some(run) = self.take_deferred() {
+            let resume = self.pos;
+            self.pos = run.start;
+            for _ in 0..run.count {
+                self.unknown_member()?;
             }
-            self.skip_value()?;
+            self.pos = resume;
         }
         self.leave();
         Ok(())
+    }
+
+    /// Step over a member no field claims, or refuse it, as the policy says.
+    fn unknown_member(&mut self) -> PResult<()> {
+        let n = self.count()?;
+        let at = self.pos;
+        self.take(n)?;
+        if O::ERROR_ON_UNKNOWN_KEYS {
+            self.pos = at;
+            return Err(ErrorCode::UnknownKey);
+        }
+        self.skip_value()
     }
 
     /// Read a BEVE enum into a type declared with `unit_enum!` or
@@ -842,14 +940,16 @@ impl<'de, O: Options> Reader<'de, O> {
     ///
     /// The mirror of
     /// [`json::Parser::read_internally_tagged`](crate::json::Parser::read_internally_tagged),
-    /// and it holds to the same rule: **the tag has to be the object's first
-    /// member.** An object beginning with any other key is
-    /// [`ErrorCode::ExpectedTag`] rather than searched, because searching
-    /// means a second pass this crate does not take.
+    /// and it finds a late tag the same way: the members before it are
+    /// stepped over, the members after it are read, and then the ones
+    /// stepped over are read into the same value. Those members cost two
+    /// walks, and a key present on both sides of the tag keeps its earlier
+    /// value. A payload member that is itself tagged late stacks its own run
+    /// on this one. An object with no tag at all is
+    /// [`ErrorCode::ExpectedTag`], reported against its first key.
     ///
-    /// A tag that is first and names no variant is
-    /// [`ErrorCode::UnknownVariant`] under every policy, for the reason
-    /// [`Self::read_enum`] gives.
+    /// A tag that names no variant is [`ErrorCode::UnknownVariant`] under
+    /// every policy, for the reason [`Self::read_enum`] gives.
     pub fn read_internally_tagged<T: ReadInternallyTagged<'de>>(
         &mut self,
         value: &mut T,
@@ -877,9 +977,31 @@ impl<'de, O: Options> Reader<'de, O> {
         // here is reported against.
         let first = self.pos;
         let n = self.count()?;
+        let mut after = members - 1;
         if self.take(n)? != T::TAG.as_bytes() {
+            // The tag is somewhere later, or nowhere. Step over members until
+            // it turns up; the ones stepped over are read after the payload's
+            // own, and `after` is what is left past the tag.
             self.pos = first;
-            return Err(ErrorCode::ExpectedTag);
+            let mut before = 0;
+            loop {
+                if before == members {
+                    self.pos = first;
+                    return Err(ErrorCode::ExpectedTag);
+                }
+                let n = self.count()?;
+                if self.take(n)? == T::TAG.as_bytes() {
+                    break;
+                }
+                self.skip_value()?;
+                before += 1;
+            }
+            after = members - 1 - before;
+            self.deferred.push(Deferred {
+                start: first,
+                count: before,
+                depth: self.depth,
+            });
         }
         // The tag's value names the variant, so it is a string or it is
         // nothing this can dispatch on.
@@ -894,9 +1016,7 @@ impl<'de, O: Options> Reader<'de, O> {
         // From here the generated arm owns the object's remaining members,
         // because only it knows the payload's type.
         let index = T::MAP.lookup_sized(T::VARIANTS, name);
-        if index >= T::MAP.n as usize
-            || !T::read_variant(value, index, name, self, members - 1, open)?
-        {
+        if index >= T::MAP.n as usize || !T::read_variant(value, index, name, self, after, open)? {
             self.pos = at;
             return Err(ErrorCode::UnknownVariant);
         }
@@ -907,8 +1027,23 @@ impl<'de, O: Options> Reader<'de, O> {
     ///
     /// The key arrives already typed: BEVE stores integer keys as integers, so
     /// a `HashMap<u32, _>` round-trips without the stringification JSON forces.
-    pub fn read_map<F>(&mut self, mut entry: F) -> PResult<()>
+    pub fn read_map<F>(&mut self, entry: F) -> PResult<()>
     where
+        F: FnMut(&mut Self, Key<'de>) -> PResult<()>,
+    {
+        self.read_map_counted(|_| entry)
+    }
+
+    /// [`read_map`](Self::read_map), telling the caller how many members to
+    /// expect before the first one is read.
+    ///
+    /// `start` is called once with the member count clipped to the bytes
+    /// left, since every member costs at least one, and returns the closure
+    /// that reads each entry. It is for a [`cautious`] reservation, exactly
+    /// as [`read_seq_counted`](Self::read_seq_counted)'s is.
+    pub fn read_map_counted<S, F>(&mut self, start: S) -> PResult<()>
+    where
+        S: FnOnce(usize) -> F,
         F: FnMut(&mut Self, Key<'de>) -> PResult<()>,
     {
         let h = self.head()?;
@@ -918,6 +1053,7 @@ impl<'de, O: Options> Reader<'de, O> {
         let cat = header::sub(h);
         let width = key_width(h)?;
         let members = self.count()?;
+        let mut entry = start(self.honest(members));
         self.enter()?;
 
         for _ in 0..members {
@@ -989,8 +1125,53 @@ impl<'de, O: Options> Reader<'de, O> {
     /// taking only [`TY_GENERIC_ARRAY`](header::TY_GENERIC_ARRAY); a walk
     /// alone cannot tell the shapes apart, because the closure signature and
     /// [`position`](Self::position) are the same either way.
-    pub fn read_seq<F>(&mut self, mut element: F) -> PResult<usize>
+    pub fn read_seq<F>(&mut self, element: F) -> PResult<usize>
     where
+        F: FnMut(&mut Self, usize) -> PResult<()>,
+    {
+        self.read_seq_counted(|_| element)
+    }
+
+    /// [`read_seq`](Self::read_seq), telling the caller how many elements to
+    /// expect before the first one is read.
+    ///
+    /// `start` is called once with a number the input could actually hold,
+    /// and returns the closure that reads each element. The number is the
+    /// payload's count when the payload is a block that has been checked to
+    /// be there, and otherwise the count clipped to the bytes left, since
+    /// every element costs at least one. A container that reserves on it
+    /// grows once instead of doubling its way up, and a count that lies is
+    /// clipped before it can allocate on its word. Pass it through
+    /// [`cautious`] all the same: the bytes left bound the *number* of
+    /// elements, not what each costs in memory, and a wide element type
+    /// multiplies the difference.
+    ///
+    /// The two-step shape is what lets one container be reserved by the
+    /// first closure and filled by the second: the borrow moves from one
+    /// into the other.
+    ///
+    /// ```
+    /// use structio::beve::{Read, Reader, cautious, to_vec};
+    ///
+    /// let bytes = to_vec(&vec!["a".to_string(), "b".to_string()]);
+    /// let mut out: Vec<String> = Vec::new();
+    /// let mut r = Reader::new(&bytes);
+    /// let sink = &mut out;
+    /// r.read_seq_counted(|n| {
+    ///     sink.reserve(cautious::<String>(n));
+    ///     move |r, _| {
+    ///         let mut s = String::new();
+    ///         s.read(r)?;
+    ///         sink.push(s);
+    ///         Ok(())
+    ///     }
+    /// })?;
+    /// assert_eq!(out, ["a", "b"]);
+    /// # Ok::<(), structio::ErrorCode>(())
+    /// ```
+    pub fn read_seq_counted<S, F>(&mut self, start: S) -> PResult<usize>
+    where
+        S: FnOnce(usize) -> F,
         F: FnMut(&mut Self, usize) -> PResult<()>,
     {
         let installed = self.implied.is_some();
@@ -1006,10 +1187,10 @@ impl<'de, O: Options> Reader<'de, O> {
         // codes, but saying so here means a reader does not have to know that
         // to see why an installed byte is never mistaken for a real extension.
         if !installed && h == header::COMPLEX {
-            return self.complex_run(&mut element);
+            return self.complex_run(start);
         }
         self.enter()?;
-        let n = self.drive(h, &mut element)?;
+        let n = self.drive(h, start)?;
         self.leave();
         Ok(n)
     }
@@ -1020,38 +1201,43 @@ impl<'de, O: Options> Reader<'de, O> {
     /// this installs the [synthetic one](header::complex_element) exactly as a
     /// typed array installs a real one, and for the same reason: what reads an
     /// element is the ordinary [`Read`] impl.
-    fn complex_run<F>(&mut self, element: &mut F) -> PResult<usize>
+    fn complex_run<S, F>(&mut self, start: S) -> PResult<usize>
     where
+        S: FnOnce(usize) -> F,
         F: FnMut(&mut Self, usize) -> PResult<()>,
     {
         let (class, width, pairs) = self.complex_head()?;
         // The lone form is one value, not a sequence of one.
         let n = pairs.ok_or(ErrorCode::ExpectedArray)?;
         self.have(complex_payload(width, Some(n))?)?;
-        self.run(n, header::complex_element(class), element)
+        let mut element = start(n);
+        self.run(n, header::complex_element(class), &mut element)
     }
 
     /// The body of [`Self::read_seq`], with the header already in hand.
-    fn drive<F>(&mut self, h: u8, element: &mut F) -> PResult<usize>
+    fn drive<S, F>(&mut self, h: u8, start: S) -> PResult<usize>
     where
+        S: FnOnce(usize) -> F,
         F: FnMut(&mut Self, usize) -> PResult<()>,
     {
         match header::ty(h) {
             header::TY_GENERIC_ARRAY => {
                 let n = self.count()?;
+                let mut element = start(self.honest(n));
                 for i in 0..n {
                     element(self, i)?;
                 }
                 Ok(n)
             }
-            header::TY_TYPED_ARRAY => self.typed(h, element),
+            header::TY_TYPED_ARRAY => self.typed(h, start),
             _ => Err(ErrorCode::ExpectedArray),
         }
     }
 
     /// Drive the elements of a typed array.
-    fn typed<F>(&mut self, h: u8, element: &mut F) -> PResult<usize>
+    fn typed<S, F>(&mut self, h: u8, start: S) -> PResult<usize>
     where
+        S: FnOnce(usize) -> F,
         F: FnMut(&mut Self, usize) -> PResult<()>,
     {
         match self.typed_head(h)? {
@@ -1060,6 +1246,7 @@ impl<'de, O: Options> Reader<'de, O> {
                 // put until the whole run is done.
                 let bytes = n.div_ceil(8);
                 self.have(bytes)?;
+                let mut element = start(n);
                 let base = self.pos;
                 for i in 0..n {
                     let bit = (self.data[base + (i >> 3)] >> (i & 7)) & 1;
@@ -1074,10 +1261,14 @@ impl<'de, O: Options> Reader<'de, O> {
                 self.pos = base + bytes;
                 Ok(n)
             }
-            Typed::Strings(n) => self.run(n, header::STRING, element),
+            Typed::Strings(n) => {
+                let mut element = start(self.honest(n));
+                self.run(n, header::STRING, &mut element)
+            }
             Typed::Fixed(h, n) => {
                 self.have(payload_len(h, n)?)?;
-                self.run(n, header::element_of(h), element)
+                let mut element = start(n);
+                self.run(n, header::element_of(h), &mut element)
             }
         }
     }
