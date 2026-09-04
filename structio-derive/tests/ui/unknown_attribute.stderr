@@ -1,0 +1,5 @@
+error: unknown attribute `deny_unknown_fields` on a struct; the attributes here are `rename_all`, `array`, `element`, `json`, `beve` and `crate`
+ --> tests/ui/unknown_attribute.rs:2:12
+  |
+2 | #[structio(deny_unknown_fields)]
+  |            ^^^^^^^^^^^^^^^^^^^

@@ -375,7 +375,7 @@ A newtype wrapper is still the answer where an adapter cannot reach: a foreign t
 
 ## What was built
 
-**A**, with **C** available underneath. `structio` has zero dependencies and no proc-macro crate.
+**A**, with **C** available underneath, and later **B** as the optional `derive` feature. `structio` has zero dependencies by default; enabling the feature adds `structio-derive`, which is the thin design below rebuilt to cover enums, with no dependencies of its own. [The derive](derive.md) documents it.
 
 ## Recommendation
 
@@ -383,4 +383,4 @@ Ship **A** in the core crate as the primary path, with **C** always available un
 
 The compile-time half of the original argument for A did not survive measurement and has been struck from it. What is left still holds, and holds for better reasons: the dependency graph, non-intrusiveness, and an expansion a person can read. The one cost that would have argued for B, field drift, is closed by [the completeness check](schemas.md#a-declaration-is-checked-against-its-type).
 
-**B** was built as a prototype, measured, and removed rather than shipped, for the reasons in [why it was not shipped](#why-it-was-not-shipped). It can still be added later as a separate crate without changing a line of the core library, because all three target the identical trait, and it is the way to skip `KeyMap::build`'s const evaluation if that ever becomes the problem. What would argue for it is someone hitting the generics restatement often enough to say so, or a per-field option that will not fit A's positional syntax. Neither has happened.
+**B** was built as a prototype, measured, and removed rather than shipped, for the reasons in [why it was not shipped](#why-it-was-not-shipped). It was then shipped after all, as an opt-in feature, once a port of a fifty-crate workspace counted what the restatement costs: 366 declarations repeating a field list, and a run of hand-written impls and mirror types for the shapes the macros cannot see. Two of the objections above are answered by that build, which covers enums and refuses every unsupported form by name; the third, that it is intrusive, is why it is a feature rather than the front door. It can still be added later as a separate crate without changing a line of the core library, because all three target the identical trait, and it is the way to skip `KeyMap::build`'s const evaluation if that ever becomes the problem. What would argue for it is someone hitting the generics restatement often enough to say so, or a per-field option that will not fit A's positional syntax. Neither has happened.

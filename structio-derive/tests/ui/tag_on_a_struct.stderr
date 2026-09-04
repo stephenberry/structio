@@ -1,0 +1,5 @@
+error: `tag` names the member an enum's variant name is written under; a struct has no variant to tag
+ --> tests/ui/tag_on_a_struct.rs:2:12
+  |
+2 | #[structio(tag = "kind")]
+  |            ^^^

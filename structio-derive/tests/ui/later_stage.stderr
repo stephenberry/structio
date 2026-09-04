@@ -1,0 +1,11 @@
+error: `skip_if` is a stage 3 attribute and this derive implements stage 1; see docs/derive.md for what each stage adds
+ --> tests/ui/later_stage.rs:3:16
+  |
+3 |     #[structio(skip_if = "Vec::is_empty")]
+  |                ^^^^^^^
+
+error: `content` is a stage 2 attribute and this derive implements stage 1; see docs/derive.md for what each stage adds
+ --> tests/ui/later_stage.rs:8:26
+  |
+8 | #[structio(tag = "kind", content = "data")]
+  |                          ^^^^^^^

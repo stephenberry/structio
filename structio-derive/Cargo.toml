@@ -1,0 +1,29 @@
+[package]
+name = "structio-derive"
+version = "0.3.2"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "The optional #[derive(Structio)] for structio. Enable structio's `derive` feature rather than depending on this crate directly."
+repository = "https://github.com/stephenberry/structio"
+keywords = ["json", "beve", "serialization", "derive"]
+categories = ["encoding"]
+
+[lib]
+proc-macro = true
+
+# Deliberately none. The derive walks `proc_macro::TokenStream` itself: it is a
+# front end that turns a type into the declaration `object!` and the enum
+# macros already accept, and that is a few hundred lines of token walking,
+# not a job for `syn`. See docs/schema-declaration.md in the repository for
+# what that saves.
+[dependencies]
+
+[dev-dependencies]
+structio = { path = "..", features = ["derive"] }
+# The compile-fail harness for tests/ui. `nocompile` depends on nothing but
+# `std`, which is the same standard the rest of this workspace is held to and
+# the reason it is here rather than `trybuild`: a handful of fixtures asserting
+# that the derive refuses an attribute should not be the largest thing in
+# `cargo tree`. The goldens are the format `trybuild` writes.
+nocompile = "0.6"

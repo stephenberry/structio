@@ -1,0 +1,5 @@
+error: a positional struct writes no keys, so a case rule has nothing to convert
+ --> tests/ui/case_on_an_array.rs:2:32
+  |
+2 | #[structio(array, rename_all = "camelCase")]
+  |                                ^^^^^^^^^^^

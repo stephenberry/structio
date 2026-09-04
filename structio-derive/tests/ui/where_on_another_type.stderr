@@ -1,0 +1,5 @@
+error: this predicate cannot be moved onto a parameter. The declaration macros take bounds inline, so `where` may bound the type's own parameters, as `T: Bound` or `'a: 'b`, and nothing else
+ --> tests/ui/where_on_another_type.rs:4:5
+  |
+4 |     Vec<T>: Clone,
+  |     ^^^

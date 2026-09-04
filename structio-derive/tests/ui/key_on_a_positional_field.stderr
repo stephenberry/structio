@@ -1,0 +1,5 @@
+error: `rename` has no meaning on a field of a positional struct: an element is found by its position, has no key, and is required by the array's length. Only `skip` applies
+ --> tests/ui/key_on_a_positional_field.rs:4:16
+  |
+4 |     #[structio(rename = "x")]
+  |                ^^^^^^

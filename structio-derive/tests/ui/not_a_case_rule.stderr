@@ -1,0 +1,5 @@
+error: `camel` is not a case rule; the rules are `lowercase`, `UPPERCASE`, `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`, `SCREAMING-KEBAB-CASE`
+ --> tests/ui/not_a_case_rule.rs:2:25
+  |
+2 | #[structio(rename_all = "camel")]
+  |                         ^^^^^^^

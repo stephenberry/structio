@@ -41,6 +41,9 @@ jobs:
       # crate this arithmetic-heavy to be worth both.
       - run: cargo test
       - run: cargo test --release
+      # The derive is a second crate behind a feature; its parity and UI tests
+      # run only with it on.
+      - run: cargo test --workspace --features derive
 
       # Benches and examples are not run here (the benchmark takes minutes),
       # but they are part of the crate and have to keep compiling.
@@ -55,8 +58,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo doc --no-deps
+      - run: cargo clippy --workspace --all-targets --features derive -- -D warnings
+      - run: cargo doc --no-deps --workspace --features derive
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -70,7 +73,7 @@ jobs:
       # Pinned deliberately: this is the version the manifest promises, so it
       # is checked exactly, not "whatever is oldest still supported".
       - uses: dtolnay/rust-toolchain@1.96.0
-      - run: cargo check --all-targets
+      - run: cargo check --workspace --all-targets --features derive
 
   # What actually gets uploaded is the packaged tarball, not the working tree.
   # This builds and tests it in isolation, which is where a file left out of
@@ -81,7 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --dry-run
+      - run: cargo publish --dry-run --workspace
 
   # BEVE writes typed arrays as raw little-endian blocks and byte-swaps them
   # elsewhere. s390x is the readily available big-endian target, and running
