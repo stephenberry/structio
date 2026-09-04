@@ -16,7 +16,7 @@ Built in the spirit of [Glaze](https://github.com/stephenberry/glaze).
 
 ```toml
 [dependencies]
-structio = "0.3"
+structio = "0.4"
 ```
 
 Rust 2024 edition, MSRV 1.96.
@@ -184,7 +184,7 @@ No comparison against `serde_json` has been run, so please do not infer one.
 
 ## Status
 
-Version 0.3.2. The API is not yet frozen and the version number should be taken at face value. What changes between releases is in [CHANGELOG.md](CHANGELOG.md).
+Version 0.4.0. The API is not yet frozen and the version number should be taken at face value. What changes between releases is in [CHANGELOG.md](CHANGELOG.md).
 
 What that does *not* mean is untested. See [docs/correctness.md](docs/correctness.md) for the fuzzing, the exhaustive `f32` sweep, the Miri coverage of every `unsafe` block, and the byte-for-byte cross-check of the BEVE encoding against an independent implementation.
 

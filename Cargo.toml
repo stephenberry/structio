@@ -1,6 +1,6 @@
 [package]
 name = "structio"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
@@ -27,7 +27,7 @@ derive = ["dep:structio-derive"]
 [dependencies]
 # Pinned exactly: the derive emits the macros' syntax, so the two crates move
 # together and are published together, the derive first.
-structio-derive = { version = "=0.3.2", path = "structio-derive", optional = true }
+structio-derive = { version = "=0.4.0", path = "structio-derive", optional = true }
 
 [package.metadata.docs.rs]
 all-features = true

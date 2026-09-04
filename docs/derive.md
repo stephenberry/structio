@@ -6,7 +6,7 @@ It is optional. Enable the `derive` feature:
 
 ```toml
 [dependencies]
-structio = { version = "0.3", features = ["derive"] }
+structio = { version = "0.4", features = ["derive"] }
 ```
 
 The feature is off by default, so a crate that does not enable it builds structio as it always has: no dependencies and no proc-macro. The macros are not deprecated. They remain the only way to describe a type from another crate, and the derive changes nothing about what they accept.
