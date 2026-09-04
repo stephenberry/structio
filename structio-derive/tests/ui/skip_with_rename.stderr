@@ -1,0 +1,5 @@
+error: a skipped field is not on the wire, so `rename` has nothing to apply to
+ --> tests/ui/skip_with_rename.rs:3:16
+  |
+3 |     #[structio(skip, rename = "x")]
+  |                ^^^^

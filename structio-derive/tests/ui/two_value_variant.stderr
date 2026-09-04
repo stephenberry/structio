@@ -1,0 +1,5 @@
+error: a variant carries one value: the tag wraps one payload, and the payload is a type of its own. Give these fields a struct, or a tuple
+ --> tests/ui/two_value_variant.rs:5:10
+  |
+5 |     Range(u32, u32),
+  |          ^^^^^^^^^^

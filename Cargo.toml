@@ -13,9 +13,24 @@ categories = ["encoding", "parser-implementations"]
 # for work in this repository and has no meaning in a dependency, where nothing
 # reads it; the CI configuration is about the repository rather than the crate.
 # Everything else ships, tests and docs included, so the package is the source.
-exclude = [".github/", "rust-toolchain.toml"]
+exclude = [".github/", "rust-toolchain.toml", "structio-derive/"]
+
+[workspace]
+members = ["structio-derive"]
+
+[features]
+# `#[derive(Structio)]`, a front end to the declaration macros. Off by
+# default: the crate's dependency-free build is unchanged, and the macros
+# remain the way to declare a type you do not own.
+derive = ["dep:structio-derive"]
 
 [dependencies]
+# Pinned exactly: the derive emits the macros' syntax, so the two crates move
+# together and are published together, the derive first.
+structio-derive = { version = "=0.3.2", path = "structio-derive", optional = true }
+
+[package.metadata.docs.rs]
+all-features = true
 
 [profile.release]
 opt-level = 3
@@ -31,3 +46,7 @@ codegen-units = 1
 [[bench]]
 name = "roundtrip"
 harness = false
+
+[[test]]
+name = "derive"
+required-features = ["derive"]

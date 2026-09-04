@@ -1,0 +1,5 @@
+error: `rename` is given twice
+ --> tests/ui/given_twice.rs:3:30
+  |
+3 |     #[structio(rename = "a", rename = "b")]
+  |                              ^^^^^^

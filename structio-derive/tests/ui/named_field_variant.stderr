@@ -1,0 +1,5 @@
+error: a variant with named fields is a stage 2 shape and this derive implements stage 1; give the fields a struct declared on its own, and see docs/derive.md
+ --> tests/ui/named_field_variant.rs:5:12
+  |
+5 |     Window { size: u32, guard: u32 },
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^

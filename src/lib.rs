@@ -103,11 +103,14 @@
 //! # Design
 //!
 //! - **No dependencies.** Standard library only.
-//! - **No proc-macros.** [`object!`], [`array!`] and [`tagged_enum!`] are
-//!   `macro_rules!` macros, so there is no proc-macro crate to build and link
-//!   for the host before your code can, and nothing extra when
+//! - **No proc-macros required.** [`object!`], [`array!`] and [`tagged_enum!`]
+//!   are `macro_rules!` macros, so there is no proc-macro crate to build and
+//!   link for the host before your code can, and nothing extra when
 //!   cross-compiling. It buys a smaller dependency graph rather than a faster
-//!   build: expanding a declaration costs about what a derive costs.
+//!   build: expanding a declaration costs about what a derive costs. The
+//!   `derive` feature adds `#[derive(Structio)]`, a dependency-free front end
+//!   that expands to the same macros, for a type you own and would rather
+//!   not restate.
 //! - **A declaration is checked against its type.** Naming a field the struct
 //!   does not have has always been an error; leaving one out is now one too,
 //!   naming the field. End a declaration with `..` where the omission is
@@ -312,6 +315,54 @@ pub use options::{
 };
 pub use traits::{Elements, Keys, ReadWrite, Same, Variants, assert_tag_not_a_field};
 pub use value::{Number, Object, Value, from_value, from_value_with, to_value};
+
+/// Declare a type's schema from its definition: `#[derive(Structio)]`.
+///
+/// Available behind the `derive` feature. The derive is a front end to
+/// [`object!`], [`array!`], [`unit_enum!`] and [`tagged_enum!`]: it reads the
+/// struct or enum and emits the declaration you would have written, with the
+/// attributes translated to the macro's syntax, so a derived type and a
+/// declared type are the same impls. Generics and their bounds are read off
+/// the type rather than restated, and a `#[structio(skip)]` field is the `..`
+/// a declaration ends with.
+///
+/// ```
+/// # #[cfg(feature = "derive")] {
+/// #[derive(Default, structio::Structio)]
+/// #[structio(rename_all = "camelCase")]
+/// struct Camera {
+///     focal_length: f64,
+///     #[structio(rename = "iso")]
+///     sensitivity: u32,
+///     #[structio(skip)]
+///     cache: Vec<u8>,
+/// }
+///
+/// let camera = Camera { focal_length: 50.0, sensitivity: 200, cache: vec![1] };
+/// assert_eq!(structio::to_string(&camera), r#"{"focalLength":50,"iso":200}"#);
+/// # }
+/// ```
+///
+/// The attributes:
+///
+/// | On | Attribute | Expands to |
+/// |---|---|---|
+/// | the type | `rename_all = "camelCase"` | `as "camelCase"` |
+/// | the type | `tag = "kind"` | `as tag "kind"`, an internally tagged enum |
+/// | the type | `array`, `element = "u8"` | [`array!`], with its element type |
+/// | the type | `json`, `beve` | the one-format macro |
+/// | the type | `crate = "path"` | the path to this crate where it is re-exported |
+/// | a field | `rename = "key"` | `"key" => field` |
+/// | a field | `skip` | left out, and `..` at the end |
+/// | a field | `required` | `#[required]` |
+/// | a field | `with = "Adapter"` | `field as Adapter` |
+/// | a variant | `rename = "name"` | `"name" => Variant` |
+///
+/// [docs/derive.md](https://github.com/stephenberry/structio/blob/main/docs/derive.md)
+/// has each attribute in full, what the derive refuses and why, and the
+/// attributes later stages add.
+#[cfg(feature = "derive")]
+pub use structio_derive::Structio;
 
 pub use json::{
     Documents, Feed, Mode, append, append_with, from_reader, from_reader_with, from_slice,

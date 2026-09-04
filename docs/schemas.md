@@ -16,7 +16,7 @@ struct Person {
 structio::object!(Person { first_name, age });
 ```
 
-That is the whole declaration. `Person` can now be read from and written to both JSON and BEVE.
+That is the whole declaration. `Person` can now be read from and written to both JSON and BEVE. For a type you own, the `derive` feature offers `#[derive(Structio)]` as a front end to the same macro; see [the derive](derive.md).
 
 The macro is invoked at the same scope as the type, not inside it, and it does not modify the struct. Nothing is hidden: the code it generates is the code you would write by hand, and `examples/manual_impls.rs` is that code, spelled out and compiled.
 

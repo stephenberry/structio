@@ -1,0 +1,5 @@
+error: `json` and `beve` each narrow the derive to one format; leave both out to generate for both
+ --> tests/ui/both_formats.rs:2:18
+  |
+2 | #[structio(json, beve)]
+  |                  ^^^^

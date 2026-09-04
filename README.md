@@ -4,7 +4,7 @@
 [![docs.rs](https://img.shields.io/docsrs/structio)](https://docs.rs/structio)
 [![CI](https://github.com/stephenberry/structio/actions/workflows/ci.yml/badge.svg)](https://github.com/stephenberry/structio/actions/workflows/ci.yml)
 
-**High-performance JSON and [BEVE](https://github.com/stephenberry/beve) for Rust structs.** No dependencies, no proc-macros, no intermediate representation.
+**High-performance JSON and [BEVE](https://github.com/stephenberry/beve) for Rust structs.** No dependencies, no proc-macros required, no intermediate representation.
 
 Values are read straight into your types and written straight out of them. There is no token stream and no intermediate document model: a field's bytes are converted exactly once, into the member that will hold them.
 
@@ -63,7 +63,7 @@ Reach for structio when one of these matters more:
 | | |
 |---|---|
 | **You want BEVE** | A binary format that stays self-describing, so numeric arrays are a `memcpy` and documents are much smaller, without giving up the ability to skip a field you do not understand. |
-| **You want a small dependency graph** | Nothing to audit, nothing to vendor, no proc-macro crate to build and link for the host before your own code can start, and nothing extra when cross-compiling. Compile *time* is a wash: measured over 200 declared structs, one format's impls cost about what `serde`'s two derives do. |
+| **You want a small dependency graph** | Nothing to audit, nothing to vendor, no proc-macro crate to build and link for the host before your own code can start, and nothing extra when cross-compiling. Compile *time* is a wash: measured over 200 declared structs, one format's impls cost about what `serde`'s two derives do. The optional `derive` feature adds one dependency-free proc-macro crate and nothing else. |
 | **You want to see what runs** | `object!`, `array!` and `tagged_enum!` expand to ordinary trait impls you could have written. There is no derive to reverse-engineer when something is slow or wrong. |
 | **You are converting a fixed set of known types** | Which is what the design is optimized for, at the cost of not handling arbitrary documents at all. |
 
@@ -72,7 +72,7 @@ Reach for structio when one of these matters more:
 ## Highlights
 
 - **No dependencies.** Standard library only.
-- **No proc-macros.** `object!`, `array!` and `tagged_enum!` are `macro_rules!` macros.
+- **No proc-macros required.** `object!`, `array!` and `tagged_enum!` are `macro_rules!` macros. `#[derive(Structio)]`, behind the `derive` feature, is a front end that expands to them; see [the derive](docs/derive.md).
 - **A declaration is checked against its type.** A field added to the struct and forgotten in the declaration is a build error naming the field, not a member that quietly stops being written. `..` at the end says an omission is deliberate.
 - **One schema, both formats.** The field list and its hash table are declared once and shared; only the bytes differ.
 - **Objects or arrays.** `object!` declares a struct by key, `array!` by position, for types like a coordinate whose field names carry nothing.
