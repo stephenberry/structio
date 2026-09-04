@@ -45,10 +45,10 @@
 //! Two names whose converted keys collide are a compile error, from the
 //! duplicate check [`KeyMap::build`] already performs.
 //!
-//! A raw identifier keeps its `r#`, because that is what `stringify!` hands
-//! the macro: a field written `r#type` has the key `r#type` with or without a
-//! rule, and a rule respells that rather than removing it. Give such a field
-//! an explicit key.
+//! A raw identifier loses its `r#` before the rule sees it, so a field
+//! written `r#type` has the key `type`, and a rule respells `type`. The
+//! prefix is how Rust spells a name that collides with a keyword, not part of
+//! the name the wire knows.
 //!
 //! # Coming from serde
 //!
@@ -369,6 +369,30 @@ pub const fn as_str(bytes: &[u8]) -> &str {
     }
 }
 
+/// A field or variant name with the `r#` of a raw identifier removed.
+///
+/// `stringify!` hands the key macros a raw identifier with its prefix still
+/// on, so `r#type` would otherwise have the key `r#type`. The prefix is Rust
+/// syntax for naming a field after a keyword, not part of the name: a field
+/// written `r#type` is the way to spell a `"type"` key, which is what a
+/// tagged payload usually wants. So it comes off, before any case rule runs.
+///
+/// Applied to the name only. An explicit `"r#type" => field` is a literal the
+/// declaration wrote and passes through untouched.
+///
+/// The split is at a byte boundary by construction: `r` and `#` are ASCII, so
+/// what follows them is still UTF-8, and [`as_str`] cannot panic here.
+pub const fn unraw(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    // `r#` alone is not an identifier, so the length test is about a name that
+    // merely starts with those bytes -- there is no `r#` for it to strip.
+    if bytes.len() > 2 && bytes[0] == b'r' && bytes[1] == b'#' {
+        as_str(bytes.split_at(2).1)
+    } else {
+        name
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +485,29 @@ mod tests {
         ] {
             assert_eq!(style(rule), want, "{rule}");
         }
+    }
+
+    #[test]
+    fn a_raw_identifier_loses_its_prefix() {
+        assert_eq!(unraw("r#type"), "type");
+        assert_eq!(unraw("r#fn"), "fn");
+    }
+
+    #[test]
+    fn a_name_that_is_not_raw_is_untouched() {
+        // `r` and `r#` are not raw identifiers, and a `#` anywhere else is not
+        // a prefix. None of these can reach here from `stringify!`, but the
+        // function is total and says so.
+        for name in ["type", "r", "r#", "rust", "raw#type", "http_url", "café"] {
+            assert_eq!(unraw(name), name, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_prefix_comes_off_before_the_rule() {
+        // The rule respells the name, not the prefix: `r#byte_offset` under
+        // camelCase is `byteOffset`, never `r#byteOffset` or `rByteOffset`.
+        assert_eq!(convert(unraw("r#byte_offset"), Style::Camel), "byteOffset");
+        assert_eq!(convert(unraw("r#type"), Style::Pascal), "Type");
     }
 }

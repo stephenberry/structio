@@ -674,6 +674,12 @@ macro_rules! __beve_impls {
 /// The key for a field: the explicit literal, the field name, or the field
 /// name put through the declaration's [case rule](crate::case).
 ///
+/// The name arrives from `stringify!`, so a raw identifier still carries its
+/// `r#` and [`case::unraw`](crate::case::unraw) takes it off. That happens
+/// before the rule rather than after, so a rule respells the name rather than
+/// the prefix. Every key in the crate is built here, JSON and BEVE, field and
+/// variant, so this is the one place it has to happen.
+///
 /// The case slot holds `_` when the declaration named no rule. An explicit
 /// literal wins over a rule wherever both are present, which is what makes
 /// `"httpURL" => http_url` the escape hatch for a name the rule spells
@@ -685,10 +691,10 @@ macro_rules! __json_key {
         $key
     };
     ([_] [$field:ident]) => {
-        ::core::stringify!($field)
+        $crate::case::unraw(::core::stringify!($field))
     };
     ([$case:tt] [$field:ident]) => {
-        $crate::__case_apply!($case, ::core::stringify!($field))
+        $crate::__case_apply!($case, $crate::case::unraw(::core::stringify!($field)))
     };
 }
 

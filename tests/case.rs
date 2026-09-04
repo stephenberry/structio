@@ -131,8 +131,8 @@ fn every_rule_spells_the_same_name_its_own_way() {
 struct Awkward {
     /// A capital next to a character the rule has no case for.
     caféBar: u32,
-    /// A raw identifier, whose `r#` is part of what `stringify!` hands the
-    /// macro and so part of the key.
+    /// A raw identifier, whose `r#` is what `stringify!` hands the macro and
+    /// is dropped before the rule sees the name.
     r#type: u32,
 }
 structio::json_object!(Awkward as "camelCase" { caféBar, r#type });
@@ -144,11 +144,13 @@ fn a_capital_beside_a_non_ascii_byte_keeps_its_case() {
 }
 
 #[test]
-fn a_raw_identifier_keeps_its_prefix() {
-    // Documented rather than desirable: `stringify!(r#type)` is `"r#type"`,
-    // with or without a rule. A field that means `type` on the wire says so
-    // with an explicit key.
-    assert!(to_string(&Awkward::default()).contains("\"r#type\""));
+fn a_raw_identifier_loses_its_prefix() {
+    // `stringify!(r#type)` is `"r#type"`, and the prefix comes off before the
+    // rule: the escape is Rust syntax for a keyword collision, not a name the
+    // wire should ever see.
+    let json = to_string(&Awkward::default());
+    assert!(json.contains("\"type\""), "{json}");
+    assert!(!json.contains("r#"), "{json}");
 }
 
 // ---------------------------------------------------------------------------
@@ -383,4 +385,126 @@ fn a_rule_survives_the_generics_form() {
     };
     assert_eq!(to_string(&v), r#"{"schemaVersion":2,"innerValue":9}"#);
     assert_eq!(from_str::<Envelope<u32>>(&to_string(&v)).unwrap(), v);
+}
+
+// ---------------------------------------------------------------------------
+// Raw identifiers
+// ---------------------------------------------------------------------------
+
+/// `r#` is Rust syntax for a name that collides with a keyword, not part of
+/// the name. A field written `r#type` is how you spell a `"type"` key, which
+/// is what a tagged payload usually wants, so the prefix comes off before the
+/// rule rather than being carried onto the wire.
+#[derive(Default, Debug, PartialEq)]
+struct Raw {
+    r#type: u32,
+    r#fn: u32,
+    plain: u32,
+}
+structio::object!(Raw {
+    r#type,
+    r#fn,
+    plain,
+});
+
+#[test]
+fn a_raw_identifier_drops_its_prefix() {
+    let v = Raw {
+        r#type: 1,
+        r#fn: 2,
+        plain: 3,
+    };
+    assert_eq!(to_string(&v), r#"{"type":1,"fn":2,"plain":3}"#);
+    assert_eq!(from_str::<Raw>(&to_string(&v)).unwrap(), v);
+}
+
+#[test]
+fn a_raw_key_reads_back_through_the_hash_and_through_beve() {
+    // The JSON prefix, the BEVE encoding and the perfect hash are three
+    // separate constants. All three have to have dropped the prefix, or the
+    // document would not read back what it wrote.
+    let v = Raw {
+        r#type: 7,
+        r#fn: 8,
+        plain: 9,
+    };
+    assert_eq!(
+        from_str::<Raw>(r#"{"type":7,"fn":8,"plain":9}"#).unwrap(),
+        v
+    );
+    assert_eq!(from_beve::<Raw>(&to_beve(&v)).unwrap(), v);
+    assert_eq!(
+        beve_to_json(&to_beve(&v)).unwrap(),
+        r#"{"type":7,"fn":8,"plain":9}"#
+    );
+}
+
+#[test]
+fn the_prefixed_key_is_gone_rather_than_also_accepted() {
+    // Not a lenient alias: `r#type` was never a key this declaration has.
+    assert_eq!(
+        from_str::<Raw>(r#"{"r#type":1,"fn":2,"plain":3}"#)
+            .unwrap_err()
+            .code,
+        ErrorCode::UnknownKey
+    );
+}
+
+/// A rule respells the name, not the prefix.
+#[derive(Default, Debug, PartialEq)]
+struct RawCased {
+    r#type: u32,
+    r#byte_offset: u32,
+}
+structio::object!(RawCased as "camelCase" {
+    r#type,
+    r#byte_offset,
+});
+
+#[test]
+fn a_rule_sees_the_name_without_its_prefix() {
+    let v = RawCased {
+        r#type: 1,
+        r#byte_offset: 2,
+    };
+    assert_eq!(to_string(&v), r#"{"type":1,"byteOffset":2}"#);
+    assert_eq!(from_str::<RawCased>(&to_string(&v)).unwrap(), v);
+}
+
+/// An explicit key is a literal the declaration wrote, so it passes through
+/// exactly as written even when it looks like a raw identifier.
+#[derive(Default, Debug, PartialEq)]
+struct RawLiteral {
+    r#type: u32,
+}
+structio::object!(RawLiteral {
+    "r#type" => r#type,
+});
+
+#[test]
+fn an_explicit_key_is_never_unrawed() {
+    assert_eq!(to_string(&RawLiteral { r#type: 5 }), r##"{"r#type":5}"##);
+}
+
+/// A variant name goes through the same key path a field name does.
+#[derive(Default, Debug, PartialEq)]
+#[allow(non_camel_case_types)]
+enum RawVariant {
+    #[default]
+    r#type,
+    Plain,
+}
+structio::unit_enum!(RawVariant { r#type, Plain });
+
+#[test]
+fn a_raw_variant_name_drops_its_prefix_too() {
+    assert_eq!(to_string(&RawVariant::r#type), r#""type""#);
+    assert_eq!(
+        from_str::<RawVariant>(r#""type""#).unwrap(),
+        RawVariant::r#type
+    );
+    assert_eq!(
+        from_beve::<RawVariant>(&to_beve(&RawVariant::r#type)).unwrap(),
+        RawVariant::r#type
+    );
 }

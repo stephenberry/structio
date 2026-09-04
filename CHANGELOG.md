@@ -8,6 +8,8 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ### Changed
 
+- **A raw identifier's `r#` is no longer part of its key.** A field or variant written `r#type` had the key `r#type`, because that is what `stringify!` hands the macro. It is now `type`, before any case rule runs, since the prefix is how Rust spells a name that collides with a keyword rather than part of the name: `r#type` is how you write a field for a `"type"` key. Both formats, fields and variants, derived and declared. An explicit `"r#type" => field` is a literal and is unchanged. **Breaking** for a declaration with a raw identifier and no explicit key, which now reads and writes a different key.
+
 - **An internally tagged enum's tag no longer has to come first.** `tagged_enum!(.. as tag "kind")` used to refuse an object whose first member was not the tag with `ExpectedTag`, which refused every document from a sorted-key writer the moment a member sorted before the tag. The reader now steps over the members before the tag, dispatches on it, reads the members after it, and then reads the ones it stepped over, nesting as deep as the payloads do. A tag that is first still costs one pass; the members before a late tag are walked twice, and a key on both sides of the tag keeps its earlier value. Required-field and unknown-key rules apply to the deferred members as to any other. An object with no tag at all is still `ExpectedTag`, reported against its first key.
 
 ### Added

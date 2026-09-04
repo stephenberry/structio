@@ -73,7 +73,7 @@ Two consequences are worth stating outright, because they are the ones that surp
 
 **A run of capitals loses its capitals.** `http_url` under `"camelCase"` is `httpUrl`, not `httpURL`, because whole words are respelled. A format that wants the acronym back asks for it with `"httpURL" => http_url`.
 
-A raw identifier is the one name a rule cannot help with. `stringify!(r#type)` is `"r#type"`, so that is the key with or without a rule, and a rule respells the `r#` along with the rest. Give such a field an explicit key.
+A raw identifier drops its `r#` before the rule sees it. `stringify!(r#type)` is `"r#type"`, but the prefix is how Rust spells a name that collides with a keyword rather than part of the name, so a field written `r#type` has the key `type` and a rule respells `type`. An explicit key, being a literal the declaration wrote, is left exactly as written.
 
 Reading a name as words rather than as a snake_case string is what lets one rule serve a variant name too, since those arrive already capitalized:
 
