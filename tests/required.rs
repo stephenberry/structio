@@ -13,7 +13,7 @@
 //!
 //! Two refusals here are compile errors and so cannot be a `#[test]`: a marked
 //! field past the 64th, and a marker that is not `required`. Both are checked
-//! by hand, this crate having no `trybuild` harness.
+//! by hand, this crate carrying no compile-fail harness.
 
 use std::collections::BTreeMap;
 

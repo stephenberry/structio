@@ -798,7 +798,7 @@ fn a_document_nested_past_the_limit_is_still_refused() {
 // -----------------------------------------------------------------------
 //
 // The collision itself is a compile error, so it cannot be asserted from here
-// without a `trybuild`-style harness this crate does not carry. What these
+// without a compile-fail harness this crate does not carry. What these
 // pin is the other side: the shapes that look like collisions and are not,
 // which is where a check of this kind goes wrong. Each would stop compiling
 // if the comparison were made against Rust field names rather than wire keys,

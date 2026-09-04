@@ -15,7 +15,7 @@
 //!
 //! One refusal here is a compile error and so cannot be a `#[test]`: a
 //! `NumericBytes` impl whose declared element is not its own width. It is
-//! checked by hand, this crate having no `trybuild` harness.
+//! checked by hand, this crate carrying no compile-fail harness.
 //!
 //! # Little-endian only, deliberately
 //!
