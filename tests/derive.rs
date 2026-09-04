@@ -510,3 +510,51 @@ fn derived_and_declared_types_nest_either_way() {
     same_wire(&m, &d);
     same_keys::<MacroOuter, Outer>();
 }
+
+// A raw identifier, which is how a field is named after a keyword. The `r#`
+// is Rust syntax rather than part of the name, so it is gone from the key on
+// both paths -- the derive inherits this from the macro it expands to.
+
+#[derive(Default, Debug, PartialEq)]
+struct MacroRaw {
+    r#type: u32,
+    r#fn: u32,
+}
+structio::object!(MacroRaw { r#type, r#fn });
+
+#[derive(Default, Debug, PartialEq, Structio)]
+struct DeriveRaw {
+    r#type: u32,
+    r#fn: u32,
+}
+
+#[derive(Default, Debug, PartialEq, Structio)]
+#[structio(rename_all = "camelCase")]
+struct DeriveRawCased {
+    r#byte_offset: u32,
+}
+
+#[derive(Default, Debug, PartialEq, Structio)]
+struct DeriveRawRenamed {
+    #[structio(rename = "kind")]
+    r#type: u32,
+}
+
+#[test]
+fn a_raw_identifier_is_keyed_without_its_prefix() {
+    let d = DeriveRaw { r#type: 1, r#fn: 2 };
+    let m = MacroRaw { r#type: 1, r#fn: 2 };
+    same_wire(&m, &d);
+    same_keys::<MacroRaw, DeriveRaw>();
+    assert_eq!(to_string(&d), r#"{"type":1,"fn":2}"#);
+    assert_eq!(DeriveRaw::KEYS, ["type", "fn"]);
+}
+
+#[test]
+fn a_rule_and_a_rename_both_see_the_unprefixed_name() {
+    assert_eq!(
+        to_string(&DeriveRawCased { r#byte_offset: 3 }),
+        r#"{"byteOffset":3}"#
+    );
+    assert_eq!(to_string(&DeriveRawRenamed { r#type: 4 }), r#"{"kind":4}"#);
+}
