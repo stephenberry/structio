@@ -18,6 +18,7 @@ use std::io;
 
 use crate::beve::header;
 use crate::beve::impls::{Block, NumericBytes};
+use crate::beve::reader::aligned_padding;
 use crate::error::{Error, ErrorCode, StreamError, StreamResult};
 
 /// Payload bytes taken per read.
@@ -43,7 +44,9 @@ const CHUNK: usize = 1 << 20;
 /// [plain](crate::beve::to_vec) or [aligned](crate::beve::to_vec_aligned), and
 /// a complex array. The padding the aligned form carries exists so a reader can
 /// point at the payload rather than copy it; there is nothing to point at in a
-/// stream, so it is stepped over.
+/// stream, so it is stepped over. Its length is held below the element's
+/// width, as every reader holds it, and a longer one is
+/// [`InvalidPadding`](ErrorCode::InvalidPadding) just past the length byte.
 ///
 /// A *generic* array is [`ExpectedArray`](ErrorCode::ExpectedArray) even where
 /// its elements are all numbers, holding a header apiece rather than a block,
@@ -294,15 +297,17 @@ impl<R: io::Read> Source<R> {
                 // both halves of that: no category without one gets a width,
                 // so the lookup rules out the bool and string arrays as well
                 // as the undefined numeric widths.
-                if header::ty(inner) != header::TY_TYPED_ARRAY
-                    || header::byte_width(header::sub(inner), header::count(inner)).is_none()
-                {
-                    return Err(self.fail(at, ErrorCode::InvalidHeader));
-                }
+                let width = match header::byte_width(header::sub(inner), header::count(inner)) {
+                    Some(width) if header::ty(inner) == header::TY_TYPED_ARRAY => width,
+                    _ => return Err(self.fail(at, ErrorCode::InvalidHeader)),
+                };
                 let n = self.count()?;
-                let pad = usize::from(self.byte()?);
+                let pad = self.byte()?;
+                // Refused just past the length byte, as a slice's walks refuse
+                // it.
+                aligned_padding(pad, width).map_err(|code| self.fail(self.pos, code))?;
                 let mut skip = [0u8; 255];
-                self.exact(&mut skip[..pad])?;
+                self.exact(&mut skip[..usize::from(pad)])?;
                 (header::element_of(inner), n)
             }
             // No other byte count is defined under that category.

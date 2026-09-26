@@ -13,8 +13,8 @@
 
 use structio::beve::{self, Documents, Feed, Mode, Writer, header};
 use structio::{
-    Complex, ErrorCode, Matrix, MatrixLayout, beve_to_json, from_beve, from_beve_at, to_beve,
-    to_beve_aligned, to_string, validate_beve,
+    Complex, ErrorCode, Matrix, MatrixLayout, append_beve_aligned, beve_to_json, from_beve,
+    from_beve_at, read_beve_array_into, to_beve, to_beve_aligned, to_string, validate_beve,
 };
 
 #[derive(Default, Debug, PartialEq, Clone)]
@@ -158,6 +158,69 @@ fn a_pointer_indexes_into_a_padded_payload() {
         let at = format!("/samples/{i}");
         assert_eq!(from_beve_at::<f64>(&doc, &at).unwrap(), *want);
     }
+}
+
+/// Append `values` behind prefixes of every length up to twice the widest
+/// element, and require every walk to read it back from where it starts.
+///
+/// The padding is chosen against the whole buffer, so the array read on its
+/// own is padded for an offset its reader cannot see. What every reader
+/// requires of the padding is that it be shorter than the element is wide,
+/// which the writer never breaks, wherever the array lands.
+fn reads_wherever_it_starts<T>(values: Vec<T>)
+where
+    T: beve::Write
+        + for<'de> beve::Read<'de>
+        + beve::NumericBytes
+        + Default
+        + Clone
+        + structio::json::Write
+        + PartialEq
+        + std::fmt::Debug,
+{
+    let width = size_of::<T>();
+    for prefix in 0..32 {
+        let mut buf = vec![0xEE; prefix];
+        append_beve_aligned(&values, &mut buf);
+        let doc = &buf[prefix..];
+        let label = format!("{width} bytes wide, behind {prefix}");
+        // The marker, the element header, a one-byte count, then the length.
+        assert_eq!(doc[0], header::ALIGNED_ARRAY, "{label}");
+        assert!(usize::from(doc[3]) < width, "{label}: padding {}", doc[3]);
+
+        assert_eq!(from_beve::<Vec<T>>(doc).unwrap(), values, "{label}");
+        validate_beve(doc).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        assert_eq!(beve_to_json(doc).unwrap(), to_string(&values), "{label}");
+        let last = values.len() - 1;
+        let at = format!("/{last}");
+        assert_eq!(
+            from_beve_at::<T>(doc, &at).unwrap(),
+            values[last],
+            "{label}"
+        );
+        let mut streamed = Vec::<T>::new();
+        read_beve_array_into(&mut streamed, doc).unwrap();
+        assert_eq!(streamed, values, "{label}");
+        let framed: Vec<T> = Documents::array(doc)
+            .iter::<T>()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(framed, values, "{label}");
+    }
+}
+
+#[test]
+fn a_canonical_array_reads_wherever_it_starts() {
+    reads_wherever_it_starts(vec![1u16, 2, 3]);
+    reads_wherever_it_starts(vec![-1i16, 2]);
+    reads_wherever_it_starts(vec![1.5f32, 2.5]);
+    reads_wherever_it_starts(vec![-1i32, 2, 3, 4, 5]);
+    reads_wherever_it_starts(vec![7u32; 3]);
+    reads_wherever_it_starts(vec![1.0f64, 2.0, 3.0]);
+    reads_wherever_it_starts(vec![u64::MAX, 0]);
+    reads_wherever_it_starts(vec![i64::MIN, 1]);
+    reads_wherever_it_starts(vec![i128::MIN, i128::MAX]);
+    reads_wherever_it_starts(vec![u128::MAX, 1]);
 }
 
 #[test]

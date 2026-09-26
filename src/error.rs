@@ -43,10 +43,12 @@ pub enum ErrorCode {
     /// or was the [delimiter](crate::beve::header::DELIMITER) where a value
     /// belongs.
     InvalidHeader,
-    /// A packed-boolean array set a bit past its last element. The
-    /// specification requires the unused high bits of the final byte to be
-    /// zero, so each set one would be another encoding of the same array. The
-    /// header is well formed; the payload is not.
+    /// Padding broke the specification's rule for it. A packed-boolean array
+    /// set a bit past its last element, where the unused high bits of the
+    /// final byte must be zero, so each set one would be another encoding of
+    /// the same array. Or an aligned typed array stated a padding length of
+    /// its element's width or more, where the specification allows only
+    /// `0..width`. The header is well formed; what follows it is not.
     InvalidPadding,
     /// A well-formed BEVE construct with nowhere to go: a 128-bit float, an
     /// extension beyond the four the specification defines, or, when
@@ -201,7 +203,7 @@ impl ErrorCode {
             ExceededMaxDepth => "exceeded maximum nesting depth",
             DocumentTooLarge => "value exceeds the streaming size limit",
             InvalidHeader => "invalid BEVE header",
-            InvalidPadding => "non-zero padding in a packed boolean array",
+            InvalidPadding => "invalid padding in a packed boolean or aligned array",
             UnsupportedFeature => "unsupported BEVE feature",
             UnsupportedKeyType => "unsupported object key type",
             ExpectedObject => "expected an object",

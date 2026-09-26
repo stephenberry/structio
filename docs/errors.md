@@ -154,7 +154,7 @@ Long lines are trimmed around the caret so the output stays readable. The input 
 | Code | Meaning |
 |---|---|
 | `InvalidHeader` | A header byte named a type, width, or extension that is not defined, or was the delimiter where a value belongs. A delimiter separates documents and is never a value. |
-| `InvalidPadding` | A packed-boolean array set a bit past its last element. The specification requires those bits to be zero, so each set one would be another encoding of the same array. The offset is just past the array's last byte. |
+| `InvalidPadding` | A packed-boolean array set a bit past its last element, or an aligned typed array stated a padding length of its element's width or more. The specification requires those bits to be zero and that length to be below the element's alignment. The offset is just past the byte refused: the boolean array's last byte, or the aligned array's padding length. |
 | `UnsupportedFeature` | A well-formed construct this crate does not decode: a 128-bit float, an extension beyond the four the specification defines, or, when transcoding, the deprecated type tag. |
 | `UnsupportedKeyType` | An object's keys were of a kind the destination cannot take, such as integer keys for a struct. |
 

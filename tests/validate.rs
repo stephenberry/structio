@@ -13,8 +13,9 @@ use std::collections::{HashMap, VecDeque};
 
 use structio::beve::header;
 use structio::{
-    Complex, ErrorCode, Number, SkipUnknown, Value, beve, beve_to_json, from_beve, from_beve_at,
-    from_beve_with, to_beve, validate_beve,
+    Complex, ErrorCode, Matrix, MatrixLayout, Number, SkipUnknown, Value, beve, beve_to_json,
+    from_beve, from_beve_at, from_beve_with, read_beve_array_into, to_beve, to_beve_aligned,
+    validate_beve,
 };
 
 #[derive(Default, Debug, PartialEq)]
@@ -746,13 +747,15 @@ fn drain(mut docs: beve::Documents<&[u8]>) -> structio::Result<usize> {
 fn every_walk_agrees_with_the_validator_on_every_header() {
     // Swept over every header byte, with a payload of a zero count, with one
     // of a single zero element, so that a refusal on the header is never
-    // mistaken for one about what follows it, and with one of a single element
-    // whose byte sets bit 1, which is padding to a packed-boolean array. Every walk that takes whatever
-    // is there accepts what the validator accepts and refuses what it refuses,
-    // with its code at its offset. A reader that wanted some other kind reports
-    // the mismatch, `ExpectedString` and the like; one that wanted this kind
-    // has met a header of the right type that is no value at all, and says so
-    // as the validator does.
+    // mistaken for one about what follows it, with one of a single element
+    // whose byte sets bit 1, which is padding to a packed-boolean array, and
+    // with one that is an empty array of bytes padded by one, which is more
+    // than the aligned form allows. Every walk that takes whatever is there
+    // accepts what the validator accepts and refuses what it refuses, with its
+    // code at its offset. A reader that wanted some other kind reports the
+    // mismatch, `ExpectedString` and the like; one that wanted this kind has
+    // met a header of the right type that is no value at all, and says so as
+    // the validator does.
     //
     // Three differences are by design. A walk that decodes refuses what it
     // cannot decode as soon as it knows: a 128-bit float or the deprecated
@@ -768,9 +771,20 @@ fn every_walk_agrees_with_the_validator_on_every_header() {
         ("transcode", |b| beve_to_json(b).map(drop)),
         ("skip", skipped),
     ];
-    let mut refused = 0;
+    let padded_bytes = [
+        header::header(header::TY_TYPED_ARRAY, header::CAT_UNSIGNED, 0),
+        0,
+        1,
+        0,
+    ];
+    let (mut refused, mut padding) = (0, 0);
     for h in 0..=255u8 {
-        for tail in [&[0u8][..], &[1 << 2, 0, 0, 0], &[1 << 2, 1 << 1]] {
+        for tail in [
+            &[0u8][..],
+            &[1 << 2, 0, 0, 0],
+            &[1 << 2, 1 << 1],
+            &padded_bytes,
+        ] {
             let doc = [&[h][..], tail].concat();
             let verdict = validate_beve(&doc);
             let at = |r: structio::Result<()>| r.map_err(|e| (e.code, e.index));
@@ -791,6 +805,7 @@ fn every_walk_agrees_with_the_validator_on_every_header() {
                 }
                 continue;
             };
+            padding += usize::from(v.code == ErrorCode::InvalidPadding);
             if v.code != ErrorCode::InvalidHeader {
                 continue;
             }
@@ -811,6 +826,9 @@ fn every_walk_agrees_with_the_validator_on_every_header() {
         }
     }
     assert!(refused > 0);
+    // The packed-boolean array setting a bit past its one element, and the
+    // aligned array padded past its width.
+    assert_eq!(padding, 2);
 }
 
 #[test]
@@ -1074,6 +1092,234 @@ fn a_packed_boolean_array_with_padding_set_is_not_a_value_in_any_walk() {
     }
     // Seven widths of padding in each of 1..8, 9..16 and 17.
     assert_eq!(spellings, 28 + 28 + 7);
+}
+
+/// The typed reads of one element type, each over a whole document: the
+/// element type's header, and each read's name and walk.
+type TypedReads = (u8, [(&'static str, Walk); 5]);
+
+/// [`TypedReads`] for each numeric type an aligned block can hold: as a
+/// vector, which takes a matching block in one copy and any other element by
+/// element; borrowed, which points into the input where it can; as a fixed
+/// array; through a pointer to its first element; and read from a stream.
+macro_rules! typed_reads {
+    ($($t:ty)*) => {
+        [$((
+            <$t as beve::NumericBytes>::ELEMENT,
+            [
+                (concat!("Vec<", stringify!($t), ">"), |b| from_beve::<Vec<$t>>(b).map(drop)),
+                (concat!("Cow<[", stringify!($t), "]>"), |b| {
+                    from_beve::<Cow<[$t]>>(b).map(drop)
+                }),
+                (concat!("[", stringify!($t), "; 1]"), |b| from_beve::<[$t; 1]>(b).map(drop)),
+                (concat!("pointer /0 as ", stringify!($t)), |b| {
+                    from_beve_at::<$t>(b, "/0").map(drop)
+                }),
+                (concat!("read_beve_array_into::<", stringify!($t), ">"), |b| {
+                    read_beve_array_into::<$t, _>(&mut Vec::new(), b)
+                        .map_err(|e| *e.as_parse().expect("a slice has no I/O to fail"))
+                }),
+            ],
+        )),*]
+    };
+}
+const TYPED_READS: [TypedReads; 12] = typed_reads!(u8 i8 u16 i16 u32 i32 f32 u64 i64 f64 u128 i128);
+
+#[test]
+fn an_aligned_array_padded_past_its_alignment_is_not_a_value_in_any_walk() {
+    // The specification bounds an aligned typed array's `PADDING_LENGTH` to
+    // `0..alignment`, the alignment being the element's width, and leaves the
+    // padding's contents unspecified. So every walk takes a length below the
+    // width, whatever the padding holds, and refuses one at or past it as
+    // `InvalidPadding`, just past the length byte: as the document, as an
+    // element, through a pointer, stepped over, read as every numeric type,
+    // and read from a stream. The length is refused before the padding it
+    // announces is looked for, so a document cut short behind it is refused
+    // for the same reason. A framer reports it at the value's start, as it
+    // reports everything, a top-level array streamed an element at a time
+    // included, its preamble being refused before any element goes out.
+    let elements = [header::CAT_FLOAT, header::CAT_SIGNED, header::CAT_UNSIGNED]
+        .into_iter()
+        .flat_map(|cat| (0..8).map(move |count| (cat, count)))
+        .filter_map(|(cat, count)| {
+            let width = header::byte_width(cat, count)?;
+            Some((header::header(header::TY_TYPED_ARRAY, cat, count), width))
+        });
+    // A 128-bit float has no Rust type to decode into, so the walks that
+    // decode refuse it on its header whatever its padding says.
+    let f128 = header::header(header::TY_TYPED_ARRAY, header::CAT_FLOAT, 4);
+
+    let (mut accepted, mut refused) = (0, 0);
+    let mut widths = Vec::new();
+    for (inner, width) in elements {
+        widths.push(width);
+        // Past what each width allows, sampled at the edges and at the most a
+        // byte can say.
+        let over = [width, width + 1, 15, 16, 17, 127, 128, 254, 255]
+            .into_iter()
+            .filter(|&pad| pad >= width);
+        for pad in (0..width).chain(over) {
+            // One element, zero, behind padding that is not zero, which is
+            // there to be ignored.
+            let whole = [
+                &[header::ALIGNED_ARRAY, inner, 1 << 2, pad as u8][..],
+                &vec![0xAA; pad],
+                &vec![0; width],
+            ]
+            .concat();
+            let ok = pad < width;
+            // Refused on the length alone, before the padding is looked for.
+            let cut = (!ok).then(|| whole[..4].to_vec());
+            for doc in std::iter::once(whole.clone()).chain(cut) {
+                let element = [&[header::GENERIC_ARRAY, 1 << 2][..], &doc].concat();
+                let mut walks: Vec<(String, structio::Result<()>, usize)> = vec![
+                    ("validate".into(), validate_beve(&doc), 4),
+                    ("skip".into(), skipped(&doc), 4),
+                    ("element, validate".into(), validate_beve(&element), 6),
+                ];
+                if inner != f128 || !ok {
+                    walks.extend([
+                        ("Value".into(), from_beve::<Value>(&doc).map(drop), 4),
+                        (
+                            "pointer Value".into(),
+                            from_beve_at::<Value>(&doc, "").map(drop),
+                            4,
+                        ),
+                        ("transcode".into(), beve_to_json(&doc).map(drop), 4),
+                        (
+                            "element, Value".into(),
+                            from_beve::<Value>(&element).map(drop),
+                            6,
+                        ),
+                        (
+                            "element, transcode".into(),
+                            beve_to_json(&element).map(drop),
+                            6,
+                        ),
+                        (
+                            "through a pointer".into(),
+                            from_beve_at::<Value>(&element, "/0").map(drop),
+                            6,
+                        ),
+                    ]);
+                }
+                // Refused, every typed read refuses it, whatever it wanted.
+                // Accepted, the ones that want this element type read it.
+                for (element_type, reads) in TYPED_READS {
+                    if ok && element_type != header::element_of(inner) {
+                        continue;
+                    }
+                    for (name, read) in reads {
+                        walks.push((name.into(), read(&doc), 4));
+                    }
+                }
+                if !ok {
+                    walks.extend(
+                        readers_of(header::ALIGNED_ARRAY)
+                            .into_iter()
+                            .map(|(name, walk)| (name.into(), walk(&doc), 4)),
+                    );
+                }
+                // Against the value's start, the element's being two bytes in.
+                let mut framers: Vec<(String, structio::Result<usize>, usize)> = framed(&doc)
+                    .into_iter()
+                    .map(|(name, r)| (name.into(), r, 0))
+                    .chain(
+                        framed(&element)
+                            .into_iter()
+                            .map(|(name, r)| (format!("element, {name}"), r, 2)),
+                    )
+                    .collect();
+                let (count, r) = dribbled(false, &doc);
+                framers.push(("Feed::values, dribbled".into(), r.map(|()| count), 0));
+                // The array's own elements, handed out as they arrive.
+                let whole = drain(beve::Documents::array(&doc));
+                framers.push(("Documents::array, outer".into(), whole, 0));
+                let (count, r) = dribbled(true, &doc);
+                framers.push(("Feed::array, dribbled".into(), r.map(|()| count), 0));
+
+                let label = format!("{inner:#04x}, padding {pad}, {} bytes", doc.len());
+                if ok {
+                    accepted += 1;
+                    for (name, r, _) in walks {
+                        r.unwrap_or_else(|e| panic!("{name}, {label}: {e:?}"));
+                    }
+                    for (name, r, _) in framers {
+                        assert_eq!(r.map_err(|e| e.code), Ok(1), "{name}, {label}");
+                    }
+                    continue;
+                }
+                refused += 1;
+                for (name, r, at) in walks {
+                    let got = r.map_err(|e| (e.code, e.index));
+                    assert_eq!(got, Err((ErrorCode::InvalidPadding, at)), "{name}, {label}");
+                }
+                for (name, r, at) in framers {
+                    let got = r.map_err(|e| (e.code, e.index));
+                    assert_eq!(got, Err((ErrorCode::InvalidPadding, at)), "{name}, {label}");
+                }
+            }
+        }
+    }
+    // Five float types, two of them two bytes wide, and five integer widths of
+    // each signedness, the one-byte integers taking no padding at all. Every
+    // length below each width was taken, and each refused one twice, whole
+    // and cut short.
+    widths.sort_unstable();
+    assert_eq!(widths, [1, 1, 2, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16]);
+    assert_eq!(accepted, widths.iter().sum::<usize>());
+    assert!(refused > 2 * widths.len());
+}
+
+#[test]
+fn a_matrix_holding_an_aligned_array_padded_past_its_alignment_is_not_a_value() {
+    // A matrix's data is an ordinary value, so its aligned form is refused
+    // exactly as the same array standing alone is, just past its length byte.
+    let m = Matrix::new(MatrixLayout::RowMajor, vec![1, 2], vec![1.5f64, -2.0]).unwrap();
+    let canonical = to_beve_aligned(&m);
+    let f64s = header::header(header::TY_TYPED_ARRAY, header::CAT_FLOAT, 3);
+    let marker = canonical
+        .windows(2)
+        .position(|w| w == [header::ALIGNED_ARRAY, f64s])
+        .expect("the data is in the aligned form");
+    // The marker, the element header and a one-byte count, then the length.
+    let length = marker + 3;
+    let data = &canonical[length + 1 + usize::from(canonical[length])..];
+    for pad in 0..=255usize {
+        let doc = [&canonical[..length], &[pad as u8], &vec![0xAA; pad], data].concat();
+        let walks = [
+            ("validate", validate_beve(&doc)),
+            ("Matrix", from_beve::<Matrix<f64>>(&doc).map(drop)),
+            ("Value", from_beve::<Value>(&doc).map(drop)),
+            ("transcode", beve_to_json(&doc).map(drop)),
+            ("skip", skipped(&doc)),
+        ];
+        let framers = framed(&doc);
+        if pad < 8 {
+            assert_eq!(from_beve::<Matrix<f64>>(&doc).unwrap(), m, "{pad}");
+            for (name, r) in walks {
+                r.unwrap_or_else(|e| panic!("{name}, padding {pad}: {e:?}"));
+            }
+            for (name, r) in framers {
+                assert_eq!(r.map_err(|e| e.code), Ok(1), "{name}, padding {pad}");
+            }
+            continue;
+        }
+        for (name, r) in walks {
+            let got = r.map_err(|e| (e.code, e.index));
+            let want = Err((ErrorCode::InvalidPadding, length + 1));
+            assert_eq!(got, want, "{name}, padding {pad}");
+        }
+        // A framer reports it at the start of the array, the value it refused.
+        for (name, r) in framers {
+            let got = r.map_err(|e| (e.code, e.index));
+            assert_eq!(
+                got,
+                Err((ErrorCode::InvalidPadding, marker)),
+                "{name}, padding {pad}"
+            );
+        }
+    }
 }
 
 #[test]

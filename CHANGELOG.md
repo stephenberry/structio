@@ -16,9 +16,11 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 - **A packed-boolean array with non-zero padding is `InvalidPadding`.** The specification requires the bits past the last element in the final byte to be zero, but every walk ignored them, so one array had up to 128 encodings. Every walk now refuses a set one, just past the array's last byte, or at the value's first byte from a stream's framer. A pointer into a packed-boolean array now needs the whole array present. **Breaking** for documents with non-zero padding, which this crate never writes.
 
+- **An aligned typed array padded by its element's width or more is `InvalidPadding`.** The specification bounds the padding length below the element's alignment, but every walk took up to 255. Every walk now refuses it just past the length byte, or at the value's first byte from a stream's framer. Only the range is checked: the padding's contents are ignored, and the exact length an encoder picks depends on an offset a reader cannot always know. **Breaking** for documents padded that far, which no conforming encoder writes.
+
 ### Added
 
-- **`ErrorCode::InvalidPadding`,** for the refusal above.
+- **`ErrorCode::InvalidPadding`,** for the two refusals above.
 
 ### Fixed
 

@@ -69,7 +69,7 @@ The depth limit is the document's, not the value's. Every container the pointer 
 
 ## Checking a document without decoding it
 
-`validate_beve` walks a document and confirms every value's header, unspecified bits included, every length, every nested value, every string's UTF-8, and every packed-boolean array's padding, without turning any of it into a Rust type and without allocating:
+`validate_beve` walks a document and confirms every value's header, unspecified bits included, every length, every nested value, every string's UTF-8, every packed-boolean array's padding, and every aligned array's padding length, without turning any of it into a Rust type and without allocating:
 
 ```rust
 structio::validate_beve(&bytes)?;
@@ -255,6 +255,8 @@ The offsets are counted from the start of the document, and a writer told nothin
 The reader still has to have its own buffer aligned before it can borrow anything out of it, which is the half the writer cannot settle.
 
 Reading one costs no more than reading the plain form: this crate steps over the padding and takes the payload in the same single copy, so an aligned document is not a slower document here.
+
+The padding's contents are never looked at, the specification leaving them unspecified. Its length is checked: it has to be below the element's alignment, which is its width, so a one-byte element takes no padding and an `f64` at most seven. Every walk refuses a longer one as `InvalidPadding`, just past the length byte, and a stream's framer at the array's first byte. The length is not required to be the one this crate would write, because that depends on where the array sits in the whole message, and a reader handed a slice of it, a streamed value, or a pointer's target cannot know that. A length no placement could call for is what is refused.
 
 And it can cost nothing at all. `beve::Reader::try_slice::<f64>` hands back a `&[f64]` pointing into the document, and `Cow<'de, [f64]>` is the field type that reaches for one and copies when it cannot have it. Three things have to hold. The stored element type has to be exactly the one asked for, because widening is a conversion and a conversion is a copy. The host has to be little endian. And the payload has to begin on a multiple of the element width, which is what the form buys given a document that itself begins on one: a memory map is page aligned and an allocator hands back more alignment than `Vec<u8>` promises, but the language guarantees neither, so the borrow is offered rather than required. Nothing here fails because a document landed on an odd address; it copies instead.
 

@@ -521,6 +521,10 @@ impl<'de, O: Options> Reader<'de, O> {
     /// extent from it. That is how a validator comes to accept a document a
     /// reader rejects. Anything narrower, such as the one-byte elements a
     /// borrowed `&[u8]` needs, is still the caller's to require.
+    ///
+    /// A padding length of the element's width or more is
+    /// [`InvalidPadding`](ErrorCode::InvalidPadding), just past the length
+    /// byte; see [`aligned_padding`].
     fn aligned_head(&mut self) -> PResult<(u8, usize)> {
         let inner = self.head()?;
         if header::ty(inner) != header::TY_TYPED_ARRAY || header::sub(inner) == header::CAT_OTHER {
@@ -528,10 +532,11 @@ impl<'de, O: Options> Reader<'de, O> {
         }
         // Refused on the header, before the count, as `typed_head` refuses an
         // unaligned array of the same element type.
-        fixed_width(inner)?;
+        let width = fixed_width(inner)?;
         let n = self.count()?;
-        let pad = self.take(1)?[0] as usize;
-        self.drop_bytes(pad)?;
+        let pad = self.take(1)?[0];
+        aligned_padding(pad, width)?;
+        self.drop_bytes(usize::from(pad))?;
         Ok((inner, n))
     }
 
@@ -2358,6 +2363,23 @@ fn decodable_elements(h: u8) -> PResult<()> {
 pub(crate) fn bool_padding(n: usize, last: u8) -> PResult<()> {
     let used = n & 7;
     if used != 0 && last >> used != 0 {
+        return Err(ErrorCode::InvalidPadding);
+    }
+    Ok(())
+}
+
+/// Refuse an aligned block's `PADDING_LENGTH` if it is not below the
+/// element's alignment, which for every numeric type is its width.
+///
+/// The specification bounds it to `0..alignment` and leaves the padding's
+/// contents unspecified, so those are not looked at. Nor is the length
+/// required to be the one an encoder would choose: that depends on the
+/// block's offset from the start of the whole message, which a reader handed
+/// a slice of it, a streamed value, or a pointer's target cannot know. What
+/// is refused is a length no placement could call for.
+#[inline]
+pub(crate) fn aligned_padding(pad: u8, width: usize) -> PResult<()> {
+    if usize::from(pad) >= width {
         return Err(ErrorCode::InvalidPadding);
     }
     Ok(())
