@@ -63,13 +63,13 @@ The pointer syntax is the standard one. `/` separates levels, `~1` spells a `/` 
 
 Two failures are kept apart. A well-formed pointer that names nothing the document holds is `NoSuchValue`; a pointer that is not well formed at all, such as one that does not begin with `/` or an array index spelled `01`, is `InvalidPointer`. Only the first of those is the document's fault.
 
-The bytes after the value named are never looked at, so unlike `from_beve` this does not require the document to end where the value does. If that matters, validate first.
+The bytes after the value named are never looked at, so unlike `from_beve` this does not require the document to end where the value does. If that matters, validate first. The one exception is an element of a packed-boolean array, which needs the whole array present: its padding is in the last byte, and is checked.
 
 The depth limit is the document's, not the value's. Every container the pointer passes through is counted as reading the whole document would count it, and so is everything stepped over on the way, so a value too deep for `from_beve` to reach is too deep to reach through a pointer. A hand-driven `Reader::seek` measures from where the reader stands instead, as everything on a hand-driven reader does.
 
 ## Checking a document without decoding it
 
-`validate_beve` walks a document and confirms every value's header, unspecified bits included, every length, every nested value, and every string's UTF-8, without turning any of it into a Rust type and without allocating:
+`validate_beve` walks a document and confirms every value's header, unspecified bits included, every length, every nested value, every string's UTF-8, every packed-boolean array's padding, and every aligned array's padding length, without turning any of it into a Rust type and without allocating:
 
 ```rust
 structio::validate_beve(&bytes)?;
@@ -202,11 +202,13 @@ One deliberate difference is worth knowing if you compare bytes with a `serde`-d
 
 Getting a value's extent wrong in a binary format does not fail loudly. It moves the cursor into the middle of a value, and the *next* field is parsed from there. So where the specification leaves something undefined, this reader errors rather than picking an interpretation.
 
-The complex extension's header is the case that matters. Its form field is three bits wide, so that the class and byte count line up with an ordinary number header, but only three values are defined (a lone number, a run, and an aligned run), and they differ by what precedes the payload. Values 3 through 7 are an `InvalidHeader`. So is an aligned run whose inner array is not the one the specification allows: not the aligned form, not the class's own element type, or an odd number of components. Its padding is not checked, the specification telling a decoder to ignore it.
+The complex extension's header is the case that matters. Its form field is three bits wide, so that the class and byte count line up with an ordinary number header, but only three values are defined (a lone number, a run, and an aligned run), and they differ by what precedes the payload. Values 3 through 7 are an `InvalidHeader`. So is an aligned run whose inner array is not the one the specification allows: not the aligned form, not the class's own element type, or an odd number of components. Its padding is held to the aligned form's rule below, a component being its element.
 
 A matrix's layout byte is the other one, and it is refused later rather than earlier. Its two defined values say which index varies fastest, and reading it wrongly transposes the data without changing any extent, so `Matrix` and the transcode both refuse a third value with `InvalidMatrixLayout` while `validate_beve` has no reason to look at it.
 
 A header's unspecified bits are refused too, though no extent depends on them. The specification gives a string and a generic array nothing in the five bits above the type, and a string-keyed object nothing in the top three, and requires every unspecified bit to be zero. Read as zero, a set bit would give one value several encodings, which a document that is compared, hashed or signed byte for byte cannot have. Every walk refuses such a header as `InvalidHeader`, as it refuses an undefined width.
+
+A packed-boolean array's padding is the same rule one level down. Its last byte holds the elements left over from a multiple of eight in its low bits, and the specification requires the high bits past them to be zero. Every walk refuses a set one as `InvalidPadding`, just past that byte: reading, validating, transcoding, skipping, and a pointer into the array at any index. A stream's framer reports it at the value's first byte, as it reports everything, except for a top-level array whose elements `Documents::array` or `Feed::array` hands out as they arrive: every element before the last goes out, and the refusal is at the last byte. This crate never writes non-zero padding.
 
 ## Enums are tagged by name
 
@@ -253,6 +255,8 @@ The offsets are counted from the start of the document, and a writer told nothin
 The reader still has to have its own buffer aligned before it can borrow anything out of it, which is the half the writer cannot settle.
 
 Reading one costs no more than reading the plain form: this crate steps over the padding and takes the payload in the same single copy, so an aligned document is not a slower document here.
+
+The padding's contents are never looked at, the specification leaving them unspecified. Its length is checked: it has to be below the element's alignment, which is its width, so a one-byte element takes no padding and an `f64` at most seven. In an aligned complex run the element is one component, so a `Complex<f64>` run is held to seven as well. Every walk refuses a longer one as `InvalidPadding`, just past the length byte, and a stream's framer at the array's first byte. The length is not required to be the one this crate would write, because that depends on where the array sits in the whole message, and a reader handed a slice of it, a streamed value, or a pointer's target cannot know that. A length no placement could call for is what is refused.
 
 And it can cost nothing at all. `beve::Reader::try_slice::<f64>` hands back a `&[f64]` pointing into the document, and `Cow<'de, [f64]>` is the field type that reaches for one and copies when it cannot have it. Three things have to hold. The stored element type has to be exactly the one asked for, because widening is a conversion and a conversion is a copy. The host has to be little endian. And the payload has to begin on a multiple of the element width, which is what the form buys given a document that itself begins on one: a memory map is page aligned and an allocator hands back more alignment than `Vec<u8>` promises, but the language guarantees neither, so the borrow is offered rather than required. Nothing here fails because a document landed on an odd address; it copies instead.
 

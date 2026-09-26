@@ -11,9 +11,10 @@
 //!
 //! JSON's splitter searches for a byte: the boundary is hidden by nesting and
 //! by strings, so it tracks depth and quoting and looks at every byte of the
-//! input. BEVE states every extent up front, so nothing here looks at a payload
-//! at all. What it reads is headers, counts, and object keys; everything else
-//! is a number of bytes to step over.
+//! input. BEVE states every extent up front, so almost nothing here looks at a
+//! payload. What it reads is headers, counts, object keys, and the last byte of
+//! a packed boolean run, whose padding must be zero; everything else is a
+//! number of bytes to step over.
 //!
 //! That is also what makes suspending harder rather than easier. A scan can
 //! stop between any two bytes and resume with a few flags. A walk has to stop
@@ -34,7 +35,7 @@
 
 use crate::beve::header::{self, byte_width, decode_size};
 use crate::beve::reader::{
-    MAX_DEPTH, Reader, Typed, bare_header, complex_payload, key_width, payload_len,
+    MAX_DEPTH, Reader, Typed, bare_header, bool_padding, complex_payload, key_width, payload_len,
 };
 use crate::error::{ErrorCode, PResult};
 use crate::stream::{Framer, Split};
@@ -266,7 +267,9 @@ fn size_at(buf: &[u8], p: &mut usize) -> Option<u64> {
 /// Reports how many bytes the preamble occupied, how many bytes of payload
 /// follow it, and the container it opens if it opens one. A container that
 /// holds no values -- a packed boolean run, a fixed-width block -- opens none
-/// and states its whole payload instead.
+/// and states its whole payload instead. A packed boolean run's payload has to
+/// have arrived, its last byte holding the padding [`Reader::typed_head`]
+/// checks.
 ///
 /// `depth` is how many containers are already open, and is charged exactly as
 /// [`Reader::skip_value`] charges it, typed arrays included. Doing otherwise in
@@ -460,7 +463,10 @@ impl Splitter {
                     bare_header(h)?;
                     Ok((r.count()?, Elem::Generic))
                 }
-                header::TY_TYPED_ARRAY => Ok(match r.typed_head(h)? {
+                // Without the packed-boolean payload, which `typed_head` would
+                // want whole: the elements go out as their bytes arrive, and
+                // the padding is checked when the last one comes due.
+                header::TY_TYPED_ARRAY => Ok(match r.typed_preamble(h)? {
                     Typed::Bools(n) => (n, Elem::Bools { bit: 0 }),
                     Typed::Strings(n) => (n, Elem::Strings),
                     Typed::Fixed(elem, n) => {
@@ -609,6 +615,14 @@ impl Framer for Splitter {
                         }
                         Elem::Bools { bit } => match buf.get(start) {
                             Some(&byte) => {
+                                // The last element's byte holds the array's
+                                // padding, so it is checked before that element
+                                // goes out, and refused at that byte. The
+                                // elements before it have gone already, which
+                                // is the price of not holding the array.
+                                if self.left == 1 {
+                                    bool_padding(*bit as usize + 1, byte)?;
+                                }
                                 self.implied = Some(if (byte >> *bit) & 1 == 1 {
                                     header::TRUE
                                 } else {

@@ -622,14 +622,15 @@ fn the_specification_s_aligned_example_reads_in_every_walk() {
 }
 
 #[test]
-fn padding_is_stepped_over_whatever_it_holds_and_however_long_it_is() {
+fn padding_is_stepped_over_whatever_it_holds() {
     // The specification leaves the padding's contents unspecified and tells a
     // decoder to ignore them, and states its length so that a decoder never
-    // has to work it out. So neither is checked: an encoder that pads more
-    // than it needs to, or with something other than zeros, is read the same.
+    // has to work it out. So the contents are not checked: an encoder that
+    // pads with something other than zeros, or by less than it needed to, is
+    // read the same.
     let components = [1.0f64, 2.0, -3.5, 4.25];
     let want = vec![Complex::new(1.0, 2.0), Complex::new(-3.5, 4.25)];
-    for pad in [0, 1, 2, 7, 8, 15, 16, 64, 255] {
+    for pad in 0..8 {
         for fill in [0x00, 0xff, header::COMPLEX, header::ALIGNED_ARRAY] {
             let doc = aligned_f64(&components, pad, fill);
             for (walk, r, _) in every_walk(&doc) {
@@ -641,6 +642,68 @@ fn padding_is_stepped_over_whatever_it_holds_and_however_long_it_is() {
             assert_eq!(streamed, want);
         }
     }
+}
+
+#[test]
+fn padding_as_long_as_a_component_is_wide_is_refused_by_every_walk() {
+    // The specification bounds an aligned array's padding length below its
+    // element's alignment, and for the aligned complex run that element is
+    // one component. So a length below the component's width reads at every
+    // component type, and one at or past it is `InvalidPadding` just past the
+    // length byte, before the padding it announces is looked for: whole, and
+    // cut short right after the length. A framer reports it at the value's
+    // start, and the stream reader at the same offset as the rest.
+    let types = [header::CAT_FLOAT, header::CAT_SIGNED, header::CAT_UNSIGNED]
+        .into_iter()
+        .flat_map(|cat| (0..8).map(move |count| (cat, count)))
+        .filter_map(|(cat, count)| Some((cat, count, header::byte_width(cat, count)?)));
+    let (mut accepted, mut refused) = (0, 0);
+    for (cat, count, width) in types {
+        let class = header::complex_class(cat, count, header::COMPLEX_ALIGNED);
+        let f128 = cat == header::CAT_FLOAT && count == 4;
+        let over = [width, width + 1, 15, 16, 17, 255]
+            .into_iter()
+            .filter(|&pad| pad >= width);
+        for pad in (0..width).chain(over) {
+            let whole = [
+                &[
+                    header::COMPLEX,
+                    class,
+                    header::ALIGNED_ARRAY,
+                    header::array_of(cat, count),
+                    2 << 2,
+                    pad as u8,
+                ][..],
+                &vec![0xaa; pad],
+                &vec![0; 2 * width],
+            ]
+            .concat();
+            let label = format!("{class:#04x}, padding {pad}");
+            if pad < width {
+                accepted += 1;
+                validate_beve(&whole).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                // A 128-bit float is well formed and has no Rust type.
+                if !f128 {
+                    for (walk, r, _) in every_walk(&whole) {
+                        assert_eq!(r, Ok(()), "{walk}, {label}");
+                    }
+                }
+                continue;
+            }
+            for doc in [&whole[..], &whole[..6]] {
+                refused += 1;
+                refused_everywhere(&label, doc, ErrorCode::InvalidPadding, 6);
+                let streamed = structio::from_beve_reader_array::<Complex<f64>, _>(doc);
+                let e = streamed.unwrap_err();
+                let e = e.as_parse().expect("a slice has no I/O to fail");
+                assert_eq!((e.code, e.index), (ErrorCode::InvalidPadding, 6), "{label}");
+            }
+        }
+    }
+    // Every length below each of the fifteen component widths, and each of
+    // the refused lengths whole and cut short.
+    assert_eq!(accepted, 2 + 2 + 4 + 8 + 16 + 2 * (1 + 2 + 4 + 8 + 16));
+    assert!(refused > 2 * 15);
 }
 
 #[test]
@@ -734,7 +797,7 @@ fn an_aligned_run_cut_short_anywhere_is_refused_by_every_walk() {
     for (doc, streamed) in [
         (SPEC_EXAMPLE.to_vec(), f64s),
         (to_beve_aligned(&narrow), f32s),
-        (aligned_f64(&[1.0, 2.0], 13, 0xee), f64s),
+        (aligned_f64(&[1.0, 2.0], 7, 0xee), f64s),
     ] {
         streamed(&doc).unwrap();
         for cut in 1..doc.len() {

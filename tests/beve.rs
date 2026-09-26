@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use structio::beve::header;
-use structio::{ErrorCode, SkipUnknown, beve, from_beve, from_beve_with, to_beve};
+use structio::{ErrorCode, SkipUnknown, beve, from_beve, from_beve_with, to_beve, validate_beve};
 
 #[derive(Default, Debug, PartialEq, Clone)]
 struct Sample {
@@ -653,14 +653,23 @@ fn an_aligned_array_is_read_and_skipped_at_its_true_extent() {
     assert_eq!(from_beve::<Vec<f64>>(&floats).unwrap(), vec![1.0, 2.0, 3.0]);
 
     // The same payload widens element by element, as a typed array does.
-    let bytes = aligned(0x14, 3, 1, &[7, 8, 9]);
+    let mut u16s = Vec::new();
+    for v in [7u16, 8, 9] {
+        u16s.extend_from_slice(&v.to_le_bytes());
+    }
+    let halves = aligned(0x34, 3, 1, &u16s);
+    assert_eq!(from_beve::<Vec<u64>>(&halves).unwrap(), vec![7, 8, 9]);
+
+    // One-byte elements are aligned wherever they land, so they take no
+    // padding, and widen the same way.
+    let bytes = aligned(0x14, 3, 0, &[7, 8, 9]);
     assert_eq!(from_beve::<Vec<u64>>(&bytes).unwrap(), vec![7, 8, 9]);
 
     // Read as bytes, it borrows out of the input past the padding.
     assert_eq!(from_beve::<&[u8]>(&bytes).unwrap(), &[7u8, 8, 9]);
 
     // And an unknown member holding one is stepped over exactly.
-    for (name, value) in [("floats", floats), ("bytes", bytes)] {
+    for (name, value) in [("floats", floats), ("halves", halves), ("bytes", bytes)] {
         let doc = object(&[("a", to_beve(&1u32)), ("z", value), ("b", to_beve(&2u32))]);
         assert_eq!(
             from_beve_with::<SkipUnknown, Two>(&doc).unwrap(),
@@ -670,8 +679,16 @@ fn an_aligned_array_is_read_and_skipped_at_its_true_extent() {
     }
 
     // Zero padding is the ordinary case once a producer is already aligned.
-    let none = aligned(0x14, 2, 0, &[4, 5]);
-    assert_eq!(from_beve::<Vec<u8>>(&none).unwrap(), vec![4, 5]);
+    let none = aligned(0x64, 1, 0, &f64s[..8]);
+    assert_eq!(from_beve::<Vec<f64>>(&none).unwrap(), vec![1.0]);
+
+    // Padding as long as the element is wide is more than any placement
+    // needs, and is refused just past its length byte.
+    for (numeric_header, pad) in [(0x14, 1), (0x34, 2), (0x64, 8), (0x64, 255)] {
+        let over = aligned(numeric_header, 0, pad, &[]);
+        let e = validate_beve(&over).unwrap_err();
+        assert_eq!((e.code, e.index), (ErrorCode::InvalidPadding, 4), "{pad}");
+    }
 
     // A truncated payload is refused rather than read short.
     let mut short = aligned(0x64, 3, 7, &f64s);

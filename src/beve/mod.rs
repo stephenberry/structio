@@ -196,7 +196,9 @@ where
 /// value does, the rest of it being what surrounds the value asked for. The
 /// bytes after it are therefore never looked at, so a document that is
 /// malformed past the value it names is still read from successfully. Use
-/// [`validate`] first where that matters.
+/// [`validate`] first where that matters. The one exception is an element of a
+/// packed-boolean array: the array's last byte holds its padding, which is
+/// checked, so the whole array has to be present.
 ///
 /// The [depth limit](MAX_DEPTH) is the document's, not the value's: the
 /// containers the pointer passes through are counted as reading the whole
@@ -303,10 +305,11 @@ pub fn slice_ref<T: NumericBytes>(input: &[u8]) -> Option<&[T]> {
 
 /// Check that `input` is one well-formed BEVE document, without decoding it.
 ///
-/// Every header, every length, every nested value, and every string's UTF-8 is
-/// checked. Nothing is turned into a Rust type and nothing is allocated, so
-/// this costs one walk over the bytes and no memory, whatever the document
-/// holds.
+/// Every header, every length, every nested value, every string's UTF-8,
+/// every packed-boolean array's padding, and every aligned array's padding
+/// length is checked. Nothing is turned into a Rust type and nothing is
+/// allocated, so this costs one walk over the bytes and no memory, whatever
+/// the document holds.
 ///
 /// Well formed here means *exactly one* value with no trailing bytes, which is
 /// what [`from_slice`] requires too. A delimiter is not a value, so a document

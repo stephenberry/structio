@@ -45,6 +45,14 @@ pub enum ErrorCode {
     /// one its class allows: not aligned, of another element type, or holding
     /// an odd number of components.
     InvalidHeader,
+    /// Padding broke the specification's rule for it. A packed-boolean array
+    /// set a bit past its last element, where the unused high bits of the
+    /// final byte must be zero, so each set one would be another encoding of
+    /// the same array. Or an aligned typed array stated a padding length of
+    /// its element's width or more, where the specification allows only
+    /// `0..width`; in an aligned complex array the element is one component.
+    /// The header is well formed; what follows it is not.
+    InvalidPadding,
     /// A well-formed BEVE construct with nowhere to go: a 128-bit float, an
     /// extension beyond the four the specification defines, or, when
     /// [transcoding](crate::transcode), the deprecated type tag.
@@ -198,6 +206,7 @@ impl ErrorCode {
             ExceededMaxDepth => "exceeded maximum nesting depth",
             DocumentTooLarge => "value exceeds the streaming size limit",
             InvalidHeader => "invalid BEVE header",
+            InvalidPadding => "invalid padding in a packed boolean or aligned array",
             UnsupportedFeature => "unsupported BEVE feature",
             UnsupportedKeyType => "unsupported object key type",
             ExpectedObject => "expected an object",

@@ -6,10 +6,6 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 ## [Unreleased]
 
-### Added
-
-- **BEVE aligned complex arrays (complex sub-type 2).** Every walk reads them, and the aligned writers (`to_beve_aligned`, `append_beve_aligned`, `Writer::aligned`) now write a run of complex numbers wider than a byte per component in this form, so `Cow<'de, [Complex<f64>]>` and `beve_slice_ref` can borrow it. A decoder without sub-type 2, such as an earlier release of this crate, cannot read that output. Sub-types 3 through 7 are still `InvalidHeader`, as is an aligned run whose inner array is not aligned, is of another element type, or holds an odd number of components.
-
 ### Changed
 
 - **A pointer read is charged the containers it passes through.** `from_beve_at` and `Reader::seek` counted no level for the path, and stepped over siblings as if from the top, so the depth limit applied from the value named rather than to the document. `from_beve_at` now counts every container on the way, and a document every other walk refuses as too deep is refused here too. A hand-driven `seek` measures siblings on the path the same way but leaves the reader's depth as it found it. **Breaking** for a document past the limit that was readable through a pointer.
@@ -17,6 +13,16 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 - **`json::prettify` and `json::minify` are only the functions.** Each name was also a public module holding nothing but the functions already re-exported beside it, so rustdoc listed it twice and a doc link to it was ambiguous. The modules are private now, and the docs they carried are on the functions. **Breaking** for a path through the module, such as `json::prettify::prettify` or `structio::minify::minify_with`: drop the module.
 
 - **A BEVE header with an unspecified bit set is `InvalidHeader`.** The specification requires those bits to be zero, but every walk, `validate_beve` included, read a string or generic array with any of its top five bits set, or a string-keyed object with any of its top three, as the plain header, so one value had many encodings. They are now refused on the header, as an undefined width is. An object of the undefined fourth key type is `InvalidHeader` too, rather than `UnsupportedKeyType`. **Breaking** for documents that set those bits, which this crate never writes.
+
+- **A packed-boolean array with non-zero padding is `InvalidPadding`.** The specification requires the bits past the last element in the final byte to be zero, but every walk ignored them, so one array had up to 128 encodings. Every walk now refuses a set one, just past the array's last byte, or at the value's first byte from a stream's framer. A pointer into a packed-boolean array now needs the whole array present. **Breaking** for documents with non-zero padding, which this crate never writes.
+
+- **An aligned typed array padded by its element's width or more is `InvalidPadding`.** The specification bounds the padding length below the element's alignment, but every walk took up to 255. Every walk now refuses it just past the length byte, or at the value's first byte from a stream's framer. Only the range is checked: the padding's contents are ignored, and the exact length an encoder picks depends on an offset a reader cannot always know. **Breaking** for documents padded that far, which no conforming encoder writes.
+
+### Added
+
+- **`ErrorCode::InvalidPadding`,** for the two refusals above.
+
+- **BEVE aligned complex arrays (complex sub-type 2).** Every walk reads them, and the aligned writers (`to_beve_aligned`, `append_beve_aligned`, `Writer::aligned`) write a complex run in this form when a component is wider than a byte, so `Cow<'de, [Complex<f64>]>` and `beve_slice_ref` can borrow it. Current Glaze reads it; older Glaze versions and earlier releases of this crate do not. An inner array that is not aligned, is of another element type, or holds an odd number of components is `InvalidHeader`, and one padded by a component's width or more is `InvalidPadding`. Sub-types 3 through 7 stay `InvalidHeader`.
 
 ### Fixed
 
