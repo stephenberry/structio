@@ -280,10 +280,13 @@ impl<'a, O: Options> Writer<'a, O> {
     ///
     /// Only numeric arrays change, and only those wider than one byte:
     /// booleans and strings have no aligned form, and one-byte elements are
-    /// aligned wherever they land. A document with no numeric array wider than
-    /// a byte in it comes out byte for byte the same. Both forms are ordinary
-    /// BEVE and this crate reads either in one copy, so what this costs is the
-    /// padding and a form that a decoder is less likely to have implemented.
+    /// aligned wherever they land. A run of complex numbers counts as one, its
+    /// components being numbers, and takes the complex extension's aligned
+    /// form, which holds them as an aligned typed array. A document with no
+    /// numeric array wider than a byte in it comes out byte for byte the same.
+    /// Both forms are ordinary BEVE and this crate reads either in one copy, so
+    /// what this costs is the padding and a form that a decoder is less likely
+    /// to have implemented.
     ///
     /// A hand-written [`Write`] impl takes part only if it opens its arrays
     /// with [`Self::begin_typed_array`]; one that spells the preamble out with
@@ -1188,16 +1191,39 @@ impl<'a, O: Options> Writer<'a, O> {
     /// Open the array a [`Write::ARRAY`] prefix names.
     ///
     /// One byte is a typed array, which may take the aligned form. Two is the
-    /// complex extension, which is not a typed array and has no aligned form
-    /// of its own; the specification gives one only to numbers.
+    /// complex extension, which may take an aligned form of its own under the
+    /// same conditions, its components being numbers.
     #[inline]
     fn begin_array(&mut self, prefix: &[u8], len: usize) {
-        if let [header] = prefix {
-            self.begin_typed_array(*header, len);
-        } else {
-            self.raw(prefix);
-            self.size(len as u64);
+        if let [header] = *prefix {
+            self.begin_typed_array(header, len);
+            return;
         }
+        if self.aligned
+            && let [header::COMPLEX, class] = *prefix
+            && header::ty(class) == header::COMPLEX_MANY
+            && let Some(width) = padded_width(header::complex_components(class))
+        {
+            self.begin_aligned_complex_array(class, len, width);
+            return;
+        }
+        self.raw(prefix);
+        self.size(len as u64);
+    }
+
+    /// The aligned form of a run of `len` complex numbers of `class`: the
+    /// extension header, the class in its aligned form, and then an aligned
+    /// typed array of the `2 * len` interleaved components, padded onto a
+    /// multiple of `width` as any other.
+    ///
+    /// The components are the class's own numbers at the class's own width,
+    /// so the payload the caller appends is byte for byte the one the plain
+    /// run would have held.
+    fn begin_aligned_complex_array(&mut self, class: u8, len: usize, width: usize) {
+        let (cat, count) = (header::sub(class), header::count(class));
+        self.push(header::COMPLEX);
+        self.push(header::complex_class(cat, count, header::COMPLEX_ALIGNED));
+        self.begin_aligned_array(header::complex_components(class), 2 * len, width);
     }
 
     /// Write a map as a BEVE object.

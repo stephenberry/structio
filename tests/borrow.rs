@@ -244,7 +244,36 @@ fn a_complex_run_is_a_block_too() {
     });
 }
 
-/// The extension has two forms and only one of them is a run. A lone complex
+/// The aligned form is the complex run written so that a borrow can happen:
+/// the pairs land on their component width counted from the document's start,
+/// so a document placed on that width borrows wherever the run sits in it.
+#[test]
+fn an_aligned_complex_run_borrows_where_the_document_lands_on_the_width() {
+    let values = vec![Complex::new(1.0f64, 2.0), Complex::new(3.0, -4.0)];
+    let doc = to_beve_aligned(&values);
+    assert_eq!(doc[1] & 0b111, header::COMPLEX_ALIGNED);
+    for shift in 0..ALIGN {
+        placed(&doc, shift, |doc| {
+            let lands = shift % 8 == 0;
+            let mut r = beve::Reader::new(doc);
+            let taken = r.try_slice::<Complex<f64>>();
+            assert_eq!(taken.is_some(), lands, "at a shift of {shift}");
+            if let Some(block) = taken {
+                assert_eq!(block, values.as_slice());
+                let start = doc.len() - values.len() * size_of::<Complex<f64>>();
+                assert_eq!(block.as_ptr().cast::<u8>(), doc[start..].as_ptr());
+                r.finish().unwrap();
+            }
+            let whole = structio::beve_slice_ref::<Complex<f64>>(doc);
+            assert_eq!(whole.is_some(), lands, "whole, at a shift of {shift}");
+            let held: Cow<[Complex<f64>]> = from_beve(doc).unwrap();
+            assert_eq!(matches!(held, Cow::Borrowed(_)), lands, "at {shift}");
+            assert_eq!(held.as_ref(), values.as_slice());
+        });
+    }
+}
+
+/// The extension has three forms and one of them is not a run. A lone complex
 /// number carries no count, so nothing may read it as a block of no elements:
 /// a sequence that met one would come back empty rather than refusing it.
 #[test]

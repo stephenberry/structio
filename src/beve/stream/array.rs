@@ -12,7 +12,8 @@
 //! Both kinds of block qualify. A typed numeric array is one, and so is a
 //! complex array, whose interleaved `(re, im)` components are the in-memory
 //! form of `[Complex<T>]` for the same reason. They differ only in the
-//! preamble that precedes the payload.
+//! preamble that precedes the payload, and each has an aligned form that
+//! differs from the plain one the same way.
 
 use std::io;
 
@@ -42,10 +43,11 @@ const CHUNK: usize = 1 << 20;
 ///
 /// Every form whose payload is a block is accepted: a typed numeric array
 /// [plain](crate::beve::to_vec) or [aligned](crate::beve::to_vec_aligned), and
-/// a complex array. The padding the aligned form carries exists so a reader can
-/// point at the payload rather than copy it; there is nothing to point at in a
-/// stream, so it is stepped over. Its length is held below the element's
-/// width, as every reader holds it, and a longer one is
+/// a complex array in either form. The padding the aligned forms carry exists
+/// so a reader can point at the payload rather than copy it; there is nothing
+/// to point at in a stream, so it is stepped over. Its length is held below
+/// the element's width, a complex array's component counting as its element,
+/// as every reader holds it, and a longer one is
 /// [`InvalidPadding`](ErrorCode::InvalidPadding) just past the length byte.
 ///
 /// A *generic* array is [`ExpectedArray`](ErrorCode::ExpectedArray) even where
@@ -235,14 +237,28 @@ impl<R: io::Read> Source<R> {
         usize::try_from(n).map_err(|_| self.fail(at, ErrorCode::UnexpectedEnd))
     }
 
+    /// Skip an aligned array's `PADDING_LENGTH | PADDING`, for elements `width`
+    /// bytes wide.
+    ///
+    /// The length is held below the width by [`aligned_padding`] and refused
+    /// just past the length byte, as a slice's walks refuse it. The contents
+    /// are unspecified, so they are not looked at.
+    fn padding(&mut self, width: usize) -> StreamResult<()> {
+        let pad = self.byte()?;
+        aligned_padding(pad, width).map_err(|code| self.fail(self.pos, code))?;
+        let mut skip = [0u8; 255];
+        self.exact(&mut skip[..usize::from(pad)])
+    }
+
     /// Consume the array's preamble and report how many elements follow.
     ///
-    /// Three forms, all of them ones
+    /// Four forms, all of them ones
     /// [`Reader::try_slice`](crate::beve::Reader::try_slice) borrows from, read
     /// here from a stream rather than a slice: a plain typed array is `HEADER |
     /// SIZE | DATA`, the aligned form is `HEADER | NUMERIC_HEADER | SIZE |
-    /// PADDING_LENGTH | PADDING | DATA`, and a complex array is `COMPLEX |
-    /// CLASS | SIZE | DATA`.
+    /// PADDING_LENGTH | PADDING | DATA`, a complex array is `COMPLEX | CLASS |
+    /// SIZE | DATA`, and an aligned complex array is `COMPLEX | CLASS` followed
+    /// by an aligned typed array of its components.
     fn array_head<T: NumericBytes>(&mut self) -> StreamResult<usize> {
         let start = self.pos;
         let h = self.byte()?;
@@ -257,17 +273,19 @@ impl<R: io::Read> Source<R> {
             let class = self.byte()?;
             // The low three bits carry the *form*, where a number header
             // carries its type. `COMPLEX_ONE` is a lone value with no count,
-            // so it is not an array to be read in; the other six values are
+            // so it is not an array to be read in; the other five values are
             // undefined and a reader must refuse rather than guess, because
-            // the two defined forms differ by whether a size precedes the
-            // payload. The width lookup rules out the undefined classes in the
-            // same test, as it does for the aligned form below.
-            if header::ty(class) != header::COMPLEX_MANY
-                || header::byte_width(header::sub(class), header::count(class)).is_none()
-            {
+            // the defined forms differ by what precedes the payload. The width
+            // lookup rules out the undefined classes in the same test, as it
+            // does for the aligned typed array below.
+            let Some(width) = header::byte_width(header::sub(class), header::count(class)) else {
                 return Err(self.fail(at, ErrorCode::InvalidHeader));
-            }
-            let n = self.count()?;
+            };
+            let n = match header::ty(class) {
+                header::COMPLEX_MANY => self.count()?,
+                header::COMPLEX_ALIGNED => self.aligned_pairs(class, width)?,
+                _ => return Err(self.fail(at, ErrorCode::InvalidHeader)),
+            };
             // `complex_element` is exactly what a `Complex<T>` declares, so
             // the element check at the end of this function does the same work
             // for this form as for the others.
@@ -302,12 +320,7 @@ impl<R: io::Read> Source<R> {
                     _ => return Err(self.fail(at, ErrorCode::InvalidHeader)),
                 };
                 let n = self.count()?;
-                let pad = self.byte()?;
-                // Refused just past the length byte, as a slice's walks refuse
-                // it.
-                aligned_padding(pad, width).map_err(|code| self.fail(self.pos, code))?;
-                let mut skip = [0u8; 255];
-                self.exact(&mut skip[..usize::from(pad)])?;
+                self.padding(width)?;
                 (header::element_of(inner), n)
             }
             // No other byte count is defined under that category.
@@ -324,6 +337,32 @@ impl<R: io::Read> Source<R> {
             return Err(self.fail(start, ErrorCode::ElementTypeMismatch));
         }
         Ok(n)
+    }
+
+    /// Consume the aligned typed array an aligned complex array holds, and
+    /// report how many pairs it holds.
+    ///
+    /// [`Reader`](crate::beve::Reader) walks the same preamble for every other
+    /// path and refuses the same bytes; this is that walk over a stream, each
+    /// refusal reported at the byte that broke it, as this reader reports
+    /// every other, and a padding length just past its byte, as every walk
+    /// reports that. `width` is a component's.
+    fn aligned_pairs(&mut self, class: u8, width: usize) -> StreamResult<usize> {
+        let at = self.pos;
+        if self.byte()? != header::ALIGNED_ARRAY {
+            return Err(self.fail(at, ErrorCode::InvalidHeader));
+        }
+        let at = self.pos;
+        if self.byte()? != header::complex_components(class) {
+            return Err(self.fail(at, ErrorCode::InvalidHeader));
+        }
+        let at = self.pos;
+        let components = self.count()?;
+        if components % 2 != 0 {
+            return Err(self.fail(at, ErrorCode::InvalidHeader));
+        }
+        self.padding(width)?;
+        Ok(components / 2)
     }
 
     /// Fill `out` with `n` elements, `per` of them at a time.

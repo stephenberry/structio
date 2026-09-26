@@ -41,14 +41,17 @@ pub enum ErrorCode {
     // BEVE structure
     /// A header byte named a type, width, or extension this crate cannot read,
     /// or was the [delimiter](crate::beve::header::DELIMITER) where a value
-    /// belongs.
+    /// belongs. Also an aligned complex array whose inner array is not the
+    /// one its class allows: not aligned, of another element type, or holding
+    /// an odd number of components.
     InvalidHeader,
     /// Padding broke the specification's rule for it. A packed-boolean array
     /// set a bit past its last element, where the unused high bits of the
     /// final byte must be zero, so each set one would be another encoding of
     /// the same array. Or an aligned typed array stated a padding length of
     /// its element's width or more, where the specification allows only
-    /// `0..width`. The header is well formed; what follows it is not.
+    /// `0..width`; in an aligned complex array the element is one component.
+    /// The header is well formed; what follows it is not.
     InvalidPadding,
     /// A well-formed BEVE construct with nowhere to go: a 128-bit float, an
     /// extension beyond the four the specification defines, or, when

@@ -22,6 +22,8 @@ Before 1.0 the API is not frozen: a minor bump may break it, and what broke is l
 
 - **`ErrorCode::InvalidPadding`,** for the two refusals above.
 
+- **BEVE aligned complex arrays (complex sub-type 2).** Every walk reads them, and the aligned writers (`to_beve_aligned`, `append_beve_aligned`, `Writer::aligned`) write a complex run in this form when a component is wider than a byte, so `Cow<'de, [Complex<f64>]>` and `beve_slice_ref` can borrow it. Current Glaze reads it; older Glaze versions and earlier releases of this crate do not. An inner array that is not aligned, is of another element type, or holds an odd number of components is `InvalidHeader`, and one padded by a component's width or more is `InvalidPadding`. Sub-types 3 through 7 stay `InvalidHeader`.
+
 ### Fixed
 
 - **An unsigned integer reads `-0` as `0`,** as a signed one does, at every width, as a value and as an integer key: a JSON key, a BEVE string key, or a BEVE pointer token naming a key. It is still no array index, which RFC 6901 spells without a sign. It was `NumberOutOfRange`, or `ExpectedNumber` for a `u128`. A negative number is `NumberOutOfRange` at every width, a `u128` included, and a sign in front of a malformed number, such as `-` or `--1`, is refused the same way at every width, signed or not.

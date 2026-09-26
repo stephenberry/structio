@@ -126,15 +126,87 @@ fn only_numbers_wider_than_a_byte_change() {
 }
 
 #[test]
-fn a_complex_array_keeps_the_extension_form() {
-    // The specification gives the aligned form to numeric typed arrays. A run
-    // of complex numbers is neither, so it is written exactly as before.
-    let signal = vec![Complex::new(1.0f64, 2.0), Complex::new(3.0, -4.0)];
-    assert_eq!(to_beve(&signal), to_beve_aligned(&signal));
+fn a_complex_array_takes_the_extension_s_aligned_form() {
+    // The specification's own example: two `complex128` values at the start
+    // of a message. The class header says "aligned" in its low bits, and an
+    // aligned typed array of the four components follows it, padded so the
+    // payload begins at 8.
+    let signal = vec![Complex::new(1.0f64, 2.0), Complex::new(3.0, 4.0)];
+    let doc = to_beve_aligned(&signal);
+    #[rustfmt::skip]
     assert_eq!(
-        from_beve::<Vec<Complex<f64>>>(&to_beve_aligned(&signal)).unwrap(),
-        signal
+        doc,
+        [
+            0x1e, // the complex extension
+            0x62, // eight-byte floats, in the aligned form
+            0x5c, // the aligned marker
+            0x64, // a typed array of eight-byte floats
+            0x10, // four components
+            0x02, // two bytes of padding, which lands the payload on 8
+            0, 0,
+            0, 0, 0, 0, 0, 0, 0xf0, 0x3f, // 1.0
+            0, 0, 0, 0, 0, 0, 0x00, 0x40, // 2.0
+            0, 0, 0, 0, 0, 0, 0x08, 0x40, // 3.0
+            0, 0, 0, 0, 0, 0, 0x10, 0x40, // 4.0
+        ]
     );
+    assert_eq!(from_beve::<Vec<Complex<f64>>>(&doc).unwrap(), signal);
+}
+
+#[test]
+fn a_complex_array_of_one_byte_components_keeps_the_plain_form() {
+    // One-byte components are aligned wherever they land, as one-byte
+    // elements are, so the aligned form would spend four bytes on nothing.
+    let bytes = vec![Complex::new(1u8, 2), Complex::new(3, 4)];
+    assert_eq!(to_beve(&bytes), to_beve_aligned(&bytes));
+    let signed = vec![Complex::new(-1i8, 2)];
+    assert_eq!(to_beve(&signed), to_beve_aligned(&signed));
+    // And a lone complex number is not an array at all.
+    let one = Complex::new(1.0f64, 2.0);
+    assert_eq!(to_beve(&one), to_beve_aligned(&one));
+}
+
+/// Write `values` at every offset a preamble in front of it can produce, and
+/// require the components to land on their width each time.
+fn complex_lands_on_its_width<T>(values: Vec<Complex<T>>)
+where
+    Complex<T>: beve::Write + for<'de> beve::Read<'de> + Default + Clone + PartialEq,
+    T: std::fmt::Debug,
+{
+    for shift in 0..40 {
+        let doc = to_beve_aligned(&(vec![0u8; shift], values.clone()));
+        let start = payload_start::<Complex<T>>(&doc, values.len());
+        assert_eq!(
+            start % size_of::<T>(),
+            0,
+            "{} bytes wide, shifted by {shift}: payload at {start}",
+            size_of::<T>()
+        );
+        // The count and the element type are the inner array's, which says
+        // components rather than pairs.
+        let (_, back) = from_beve::<(Vec<u8>, Vec<Complex<T>>)>(&doc).unwrap();
+        assert_eq!(back, values);
+        validate_beve(&doc).unwrap();
+        assert_eq!(
+            beve_to_json(&doc).unwrap(),
+            beve_to_json(&to_beve(&(vec![0u8; shift], values.clone()))).unwrap()
+        );
+    }
+}
+
+#[test]
+fn a_complex_payload_lands_on_a_multiple_of_its_component_width() {
+    complex_lands_on_its_width(vec![Complex::new(1.5f32, -2.5), Complex::new(0.0, 1.0)]);
+    complex_lands_on_its_width(vec![Complex::new(1.0f64, 2.0); 3]);
+    complex_lands_on_its_width(vec![Complex::new(-1i16, 2), Complex::new(3, -4)]);
+    complex_lands_on_its_width(vec![Complex::new(1u16, 2)]);
+    complex_lands_on_its_width(vec![Complex::new(-1i32, i32::MAX)]);
+    complex_lands_on_its_width(vec![Complex::new(7u32, 8); 5]);
+    complex_lands_on_its_width(vec![Complex::new(i64::MIN, i64::MAX)]);
+    complex_lands_on_its_width(vec![Complex::new(u64::MAX, 0)]);
+    complex_lands_on_its_width(vec![Complex::new(i128::MIN, i128::MAX)]);
+    complex_lands_on_its_width(vec![Complex::new(u128::MAX, 1)]);
+    complex_lands_on_its_width(Vec::<Complex<f64>>::new());
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +293,59 @@ fn a_canonical_array_reads_wherever_it_starts() {
     reads_wherever_it_starts(vec![i64::MIN, 1]);
     reads_wherever_it_starts(vec![i128::MIN, i128::MAX]);
     reads_wherever_it_starts(vec![u128::MAX, 1]);
+}
+
+/// [`reads_wherever_it_starts`] for a run of complex numbers, whose padding is
+/// held below a component's width rather than a pair's.
+fn complex_reads_wherever_it_starts<T>(values: Vec<Complex<T>>)
+where
+    Complex<T>: beve::Write
+        + for<'de> beve::Read<'de>
+        + beve::NumericBytes
+        + Default
+        + Clone
+        + structio::json::Write
+        + PartialEq
+        + std::fmt::Debug,
+{
+    let width = size_of::<T>();
+    for prefix in 0..32 {
+        let mut buf = vec![0xEE; prefix];
+        append_beve_aligned(&values, &mut buf);
+        let doc = &buf[prefix..];
+        let label = format!("{width} bytes a component, behind {prefix}");
+        // The extension, the class, the marker, the element header, a one-byte
+        // count, then the length.
+        assert_eq!(doc[1] & 0b111, header::COMPLEX_ALIGNED, "{label}");
+        assert_eq!(doc[2], header::ALIGNED_ARRAY, "{label}");
+        assert!(usize::from(doc[5]) < width, "{label}: padding {}", doc[5]);
+
+        assert_eq!(
+            from_beve::<Vec<Complex<T>>>(doc).unwrap(),
+            values,
+            "{label}"
+        );
+        validate_beve(doc).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        assert_eq!(beve_to_json(doc).unwrap(), to_string(&values), "{label}");
+        let mut streamed = Vec::<Complex<T>>::new();
+        read_beve_array_into(&mut streamed, doc).unwrap();
+        assert_eq!(streamed, values, "{label}");
+        let framed: Vec<Complex<T>> = Documents::array(doc)
+            .iter::<Complex<T>>()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(framed, values, "{label}");
+    }
+}
+
+#[test]
+fn a_canonical_complex_array_reads_wherever_it_starts() {
+    complex_reads_wherever_it_starts(vec![Complex::new(1u16, 2), Complex::new(3, 4)]);
+    complex_reads_wherever_it_starts(vec![Complex::new(1.5f32, -2.5)]);
+    complex_reads_wherever_it_starts(vec![Complex::new(-1i32, 2); 3]);
+    complex_reads_wherever_it_starts(vec![Complex::new(1.0f64, 2.0), Complex::new(3.0, 4.0)]);
+    complex_reads_wherever_it_starts(vec![Complex::new(u64::MAX, 0)]);
+    complex_reads_wherever_it_starts(vec![Complex::new(i128::MIN, i128::MAX)]);
 }
 
 #[test]
@@ -406,16 +531,21 @@ fn a_matrix_pads_the_data_it_holds() {
 }
 
 #[test]
-fn a_matrix_of_complex_numbers_is_unchanged() {
+fn a_matrix_of_complex_numbers_pads_the_data_it_holds() {
     let m = Matrix::new(
         MatrixLayout::ColumnMajor,
         vec![1, 2],
         vec![Complex::new(1.0f64, 2.0), Complex::new(3.0, -4.0)],
     )
     .unwrap();
-    // Its extents are one byte wide and its data is the complex extension, so
-    // there is nothing in it with an aligned form.
-    assert_eq!(to_beve(&m), to_beve_aligned(&m));
+    // Its extents are one byte wide and keep the plain form; its data is a
+    // complex array, which takes the aligned one.
+    let doc = to_beve_aligned(&m);
+    assert_ne!(doc, to_beve(&m));
+    assert_eq!(payload_start::<Complex<f64>>(&doc, 2) % 8, 0);
+    assert_eq!(from_beve::<Matrix<Complex<f64>>>(&doc).unwrap(), m);
+    validate_beve(&doc).unwrap();
+    assert_eq!(beve_to_json(&doc).unwrap(), to_string(&m));
 }
 
 #[test]

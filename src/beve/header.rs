@@ -129,6 +129,10 @@ pub const COMPLEX_ONE: u8 = 0;
 /// A run of complex numbers: a size stands between the class header and the
 /// pairs.
 pub const COMPLEX_MANY: u8 = 1;
+/// A run of complex numbers whose components are an
+/// [aligned](ALIGNED_ARRAY) typed array: the class header is followed by that
+/// whole array, `2 * N` components long, of the class's own type.
+pub const COMPLEX_ALIGNED: u8 = 2;
 
 /// The class header a complex value carries, in the byte after
 /// [`COMPLEX`].
@@ -136,13 +140,25 @@ pub const COMPLEX_MANY: u8 = 1;
 /// The class and byte-count fields sit exactly where [`number`] puts them, so
 /// the width of a complex component is read by the same [`byte_width`]. What
 /// differs is the low three bits: a number header spends them on its type,
-/// this one on [`COMPLEX_ONE`] or [`COMPLEX_MANY`]. The field is three bits
-/// wide for that alignment and no other reason, and the other six values are
-/// undefined; a reader must refuse them rather than guess, because the two
-/// defined forms differ by whether a size precedes the payload.
+/// this one on [`COMPLEX_ONE`], [`COMPLEX_MANY`] or [`COMPLEX_ALIGNED`]. The
+/// field is three bits wide for that alignment and no other reason, and the
+/// other five values are undefined; a reader must refuse them rather than
+/// guess, because the three defined forms differ by what precedes the payload.
 #[inline(always)]
 pub const fn complex_class(cat: u8, count: u8, form: u8) -> u8 {
     header(form, cat, count)
+}
+
+/// The typed-array header an [aligned complex array](COMPLEX_ALIGNED) stores
+/// its components under, which is the class with the form swapped for the
+/// typed-array type.
+///
+/// Exactly this byte and no other: the specification requires the inner
+/// array's element type and width to be the class's, and the class's width
+/// has been checked by the time anything asks.
+#[inline(always)]
+pub(crate) const fn complex_components(class: u8) -> u8 {
+    (class & 0b1111_1000) | TY_TYPED_ARRAY
 }
 
 /// The header a complex array's elements are matched against.

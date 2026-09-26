@@ -498,11 +498,11 @@ fn a_complex_array_is_not_a_numeric_array_of_its_components() {
 /// defined ones is an array.
 ///
 /// `COMPLEX_ONE` is a lone value with no count before its payload, so reading
-/// it as an array would take the first components for a size. The other six
+/// it as an array would take the first components for a size. The other five
 /// values are undefined, and a reader must refuse rather than guess, because
-/// the two defined forms differ by exactly that size.
+/// the defined forms differ by exactly what precedes the payload.
 #[test]
-fn only_the_run_form_of_a_complex_value_is_an_array() {
+fn only_the_run_forms_of_a_complex_value_are_arrays() {
     let lone = structio::to_beve(&Complex {
         re: 1.0f64,
         im: 2.0,
@@ -515,7 +515,7 @@ fn only_the_run_form_of_a_complex_value_is_an_array() {
         re: 1.0f64,
         im: 2.0,
     }]);
-    for form in [2u8, 3, 4, 5, 6, 7] {
+    for form in [3u8, 4, 5, 6, 7] {
         doc[1] = header::complex_class(header::CAT_FLOAT, 3, form);
         let err = structio::from_beve_reader_array::<Complex<f64>, _>(&doc[..]).unwrap_err();
         assert_eq!(code(&err), ErrorCode::InvalidHeader, "form {form}");
@@ -523,6 +523,46 @@ fn only_the_run_form_of_a_complex_value_is_an_array() {
     doc[1] = header::complex_class(header::CAT_OTHER, 3, header::COMPLEX_MANY);
     let err = structio::from_beve_reader_array::<Complex<f64>, _>(&doc[..]).unwrap_err();
     assert_eq!(code(&err), ErrorCode::InvalidHeader);
+}
+
+/// The aligned form holds an aligned typed array of the class's own components
+/// and a whole number of pairs, and nothing else.
+///
+/// Refused as every other walk refuses it, and reported at the byte that broke
+/// it, as this call reports everything. A stored type that is not `T`'s is the
+/// element mismatch it is for any other block, once the preamble is known to be
+/// sound.
+#[test]
+fn an_aligned_complex_array_holds_only_the_array_it_may() {
+    let good = structio::to_beve_aligned(&vec![
+        Complex {
+            re: 1.0f64,
+            im: 2.0,
+        },
+        Complex { re: 3.0, im: 4.0 },
+    ]);
+    assert_eq!(&good[..6], [0x1e, 0x62, 0x5c, 0x64, 0x10, 0x02]);
+    let read = |doc: &[u8]| {
+        let e = structio::from_beve_reader_array::<Complex<f64>, _>(doc).unwrap_err();
+        let e = e.as_parse().copied().expect("a parse failure");
+        (e.code, e.index)
+    };
+    let with = |at: usize, byte: u8| {
+        let mut doc = good.clone();
+        doc[at] = byte;
+        doc
+    };
+    let refused = ErrorCode::InvalidHeader;
+    let f64s = header::array_of(header::CAT_FLOAT, 3);
+    assert_eq!(read(&with(2, f64s)), (refused, 2), "not aligned");
+    let f32s = header::array_of(header::CAT_FLOAT, 2);
+    assert_eq!(read(&with(3, f32s)), (refused, 3), "another element type");
+    assert_eq!(read(&with(4, 3 << 2)), (refused, 4), "an odd count");
+
+    let err = structio::from_beve_reader_array::<Complex<f32>, _>(&good[..]).unwrap_err();
+    assert_eq!(code(&err), ErrorCode::ElementTypeMismatch);
+    let err = structio::from_beve_reader_array::<f64, _>(&good[..]).unwrap_err();
+    assert_eq!(code(&err), ErrorCode::ElementTypeMismatch);
 }
 
 /// A truncated or over-long complex document fails where a numeric one does,

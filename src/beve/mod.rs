@@ -374,7 +374,7 @@ pub fn to_vec_with<O: Options, T: Write + ?Sized>(value: &T) -> Vec<u8> {
     w.into_vec()
 }
 
-/// Serialize a value with its numeric typed arrays in the aligned form.
+/// Serialize a value with its numeric arrays in the aligned form.
 ///
 /// The document [`to_vec`] writes, laid out so that a reader can point at its
 /// arrays instead of copying them out, which is what [`Reader::try_slice`]

@@ -9,8 +9,9 @@
 use structio::beve::header;
 use structio::beve::reader::MAX_DEPTH;
 use structio::{
-    Complex, ErrorCode, Matrix, MatrixLayout, MatrixRef, SkipUnknown, beve, beve_to_json,
-    from_beve, from_beve_with, from_str, to_beve, to_string, validate_beve,
+    Complex, ErrorCode, Matrix, MatrixLayout, MatrixRef, SkipUnknown, Value, beve, beve_to_json,
+    from_beve, from_beve_at, from_beve_with, from_str, to_beve, to_beve_aligned, to_string,
+    validate_beve,
 };
 
 // ---------------------------------------------------------------------------
@@ -130,6 +131,13 @@ fn every_component_type_round_trips_through_both_formats() {
             assert_eq!(beve_to_json(&to_beve(&z)).unwrap(), to_string(&z));
             assert_eq!(beve_to_json(&to_beve(&run)).unwrap(), to_string(&run));
             assert!(validate_beve(&to_beve(&run)).is_ok());
+
+            // And the aligned form of the run, which is a layout rather than a
+            // different value.
+            let aligned = to_beve_aligned(&run);
+            assert_eq!(from_beve::<Vec<Complex<$t>>>(&aligned).unwrap(), run);
+            assert_eq!(beve_to_json(&aligned).unwrap(), to_string(&run));
+            assert!(validate_beve(&aligned).is_ok());
         })*}
     }
     check! {
@@ -447,6 +455,458 @@ fn a_struct_of_complex_fields_gets_the_run_form_too() {
     assert_eq!(to_beve(&p), to_beve(&vec![p.a, p.b]));
     assert_eq!(from_beve::<Pair>(&to_beve(&p)).unwrap(), p);
     assert_eq!(to_string(&p), "[[1,2],[3,4]]");
+}
+
+// ---------------------------------------------------------------------------
+// Complex: the aligned form
+// ---------------------------------------------------------------------------
+
+/// The specification's worked example, which its repository also ships as
+/// `examples/aligned_complex_float64_array.beve`: `[1+2i, 3+4i]` as
+/// `complex128`, at the start of a message.
+#[rustfmt::skip]
+const SPEC_EXAMPLE: [u8; 40] = [
+    0x1e, // the complex extension
+    0x62, // eight-byte floats, aligned form
+    0x5c, // the aligned typed array's marker
+    0x64, // its element type, eight-byte floats
+    0x10, // four components
+    0x02, // two bytes of padding, which lands the payload on 8
+    0x00, 0x00,
+    0, 0, 0, 0, 0, 0, 0xf0, 0x3f, // 1.0
+    0, 0, 0, 0, 0, 0, 0x00, 0x40, // 2.0
+    0, 0, 0, 0, 0, 0, 0x08, 0x40, // 3.0
+    0, 0, 0, 0, 0, 0, 0x10, 0x40, // 4.0
+];
+
+/// An aligned complex array of `f64` spelled out by hand: `components` as the
+/// interleaved payload, behind `pad` bytes of padding that each hold `fill`.
+fn aligned_f64(components: &[f64], pad: usize, fill: u8) -> Vec<u8> {
+    let mut doc = vec![
+        header::COMPLEX,
+        header::complex_class(header::CAT_FLOAT, 3, header::COMPLEX_ALIGNED),
+        header::ALIGNED_ARRAY,
+        header::array_of(header::CAT_FLOAT, 3),
+    ];
+    doc.extend(size(components.len() as u64));
+    doc.push(pad as u8);
+    doc.extend(std::iter::repeat_n(fill, pad));
+    for c in components {
+        doc.extend_from_slice(&c.to_le_bytes());
+    }
+    doc
+}
+
+/// Whether a walk reports a refusal just past the byte that broke it, as a
+/// reader does, or at the value's first byte, as a framer does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Reports {
+    PastTheByte,
+    AtTheValue,
+}
+
+type Outcome = Result<(), (ErrorCode, usize)>;
+
+/// What every walk that takes a complex array makes of `doc`, each with where
+/// it reports a refusal. A reader of a lone complex number is not among them,
+/// a run being no complex number.
+fn every_walk(doc: &[u8]) -> Vec<(&'static str, Outcome, Reports)> {
+    use Reports::*;
+    let at = |r: structio::Result<()>| r.map_err(|e| (e.code, e.index));
+    // As a member no field claims, with the offset taken back to the value's
+    // own: the member's key is the four bytes in front of it.
+    let member = object(&[("z", doc.to_vec())]);
+    let skipped = at(from_beve_with::<SkipUnknown, Two>(&member).map(drop))
+        .map_err(|(code, index)| (code, index - 4));
+    // As the one element of a generic array, with the offset taken back the
+    // same way past the array's two bytes.
+    let element = wrap(1, doc);
+    let framed_element = drain(beve::Documents::array(&element[..]))
+        .map(|n| assert_eq!(n, 1))
+        .map_err(|(code, index)| (code, index - 2));
+    vec![
+        ("validate", at(validate_beve(doc)), PastTheByte),
+        (
+            "Vec<Complex<f64>>",
+            at(from_beve::<Vec<Complex<f64>>>(doc).map(drop)),
+            PastTheByte,
+        ),
+        // Stored wider than the target, so the bulk path declines and the run
+        // is driven element by element.
+        (
+            "Vec<Complex<f32>>",
+            at(from_beve::<Vec<Complex<f32>>>(doc).map(drop)),
+            PastTheByte,
+        ),
+        ("Value", at(from_beve::<Value>(doc).map(drop)), PastTheByte),
+        (
+            "pointer",
+            at(from_beve_at::<Value>(doc, "").map(drop)),
+            PastTheByte,
+        ),
+        ("transcode", at(beve_to_json(doc).map(drop)), PastTheByte),
+        ("skip", skipped, PastTheByte),
+        (
+            "Documents::values",
+            drain(beve::Documents::values(doc)).map(|n| assert_eq!(n, 1)),
+            AtTheValue,
+        ),
+        ("Documents::array, element", framed_element, AtTheValue),
+    ]
+}
+
+/// How many values `docs` hands out, or the first refusal.
+fn drain(mut docs: beve::Documents<&[u8]>) -> Result<usize, (ErrorCode, usize)> {
+    let mut n = 0;
+    while let Some(item) = docs.next_value::<Any>() {
+        if let Err(e) = item {
+            let e = e.as_parse().expect("a slice has no I/O to fail");
+            return Err((e.code, e.index));
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Require every walk, and both readers of a complex value, to refuse `doc`
+/// with `code`, at offset `at` or at the value's start.
+fn refused_everywhere(name: &str, doc: &[u8], code: ErrorCode, at: usize) {
+    let lone = from_beve::<Complex<f64>>(doc).map(drop);
+    let lone = lone.map_err(|e| (e.code, e.index));
+    let walks = every_walk(doc)
+        .into_iter()
+        .chain([("Complex<f64>", lone, Reports::PastTheByte)]);
+    for (walk, r, reports) in walks {
+        let want = match reports {
+            Reports::PastTheByte => (code, at),
+            Reports::AtTheValue => (code, 0),
+        };
+        assert_eq!(r, Err(want), "{name}: {walk}");
+    }
+}
+
+#[test]
+fn the_specification_s_aligned_example_reads_in_every_walk() {
+    let want = vec![Complex::new(1.0f64, 2.0), Complex::new(3.0, 4.0)];
+    for (walk, r, _) in every_walk(&SPEC_EXAMPLE) {
+        assert_eq!(r, Ok(()), "{walk}");
+    }
+    assert_eq!(from_beve::<Vec<Complex<f64>>>(&SPEC_EXAMPLE).unwrap(), want);
+    // The same value as the plain run, to everything that has no type for it.
+    let plain = to_beve(&want);
+    assert_eq!(beve_to_json(&SPEC_EXAMPLE).unwrap(), "[[1,2],[3,4]]");
+    assert_eq!(
+        from_beve::<Value>(&SPEC_EXAMPLE).unwrap(),
+        from_beve::<Value>(&plain).unwrap()
+    );
+    // What this crate writes for it, from the same offset.
+    assert_eq!(to_beve_aligned(&want), SPEC_EXAMPLE);
+
+    // One element at a time, at the stored width and narrowed.
+    let pulled: Vec<Complex<f64>> = beve::Documents::array(&SPEC_EXAMPLE[..])
+        .iter::<Complex<f64>>()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(pulled, want);
+    let narrowed: Vec<Complex<f32>> = beve::Documents::array(&SPEC_EXAMPLE[..])
+        .iter::<Complex<f32>>()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(narrowed, [Complex::new(1.0, 2.0), Complex::new(3.0, 4.0)]);
+
+    // A run is not one complex number, in this form any more than the other.
+    assert_eq!(
+        from_beve::<Complex<f64>>(&SPEC_EXAMPLE).unwrap_err().code,
+        ErrorCode::ExpectedComplex
+    );
+}
+
+#[test]
+fn padding_is_stepped_over_whatever_it_holds() {
+    // The specification leaves the padding's contents unspecified and tells a
+    // decoder to ignore them, and states its length so that a decoder never
+    // has to work it out. So the contents are not checked: an encoder that
+    // pads with something other than zeros, or by less than it needed to, is
+    // read the same.
+    let components = [1.0f64, 2.0, -3.5, 4.25];
+    let want = vec![Complex::new(1.0, 2.0), Complex::new(-3.5, 4.25)];
+    for pad in 0..8 {
+        for fill in [0x00, 0xff, header::COMPLEX, header::ALIGNED_ARRAY] {
+            let doc = aligned_f64(&components, pad, fill);
+            for (walk, r, _) in every_walk(&doc) {
+                assert_eq!(r, Ok(()), "{walk}, {pad} bytes of {fill:#04x}");
+            }
+            assert_eq!(from_beve::<Vec<Complex<f64>>>(&doc).unwrap(), want);
+            assert_eq!(beve_to_json(&doc).unwrap(), to_string(&want));
+            let streamed: Vec<Complex<f64>> = structio::from_beve_reader_array(&doc[..]).unwrap();
+            assert_eq!(streamed, want);
+        }
+    }
+}
+
+#[test]
+fn padding_as_long_as_a_component_is_wide_is_refused_by_every_walk() {
+    // The specification bounds an aligned array's padding length below its
+    // element's alignment, and for the aligned complex run that element is
+    // one component. So a length below the component's width reads at every
+    // component type, and one at or past it is `InvalidPadding` just past the
+    // length byte, before the padding it announces is looked for: whole, and
+    // cut short right after the length. A framer reports it at the value's
+    // start, and the stream reader at the same offset as the rest.
+    let types = [header::CAT_FLOAT, header::CAT_SIGNED, header::CAT_UNSIGNED]
+        .into_iter()
+        .flat_map(|cat| (0..8).map(move |count| (cat, count)))
+        .filter_map(|(cat, count)| Some((cat, count, header::byte_width(cat, count)?)));
+    let (mut accepted, mut refused) = (0, 0);
+    for (cat, count, width) in types {
+        let class = header::complex_class(cat, count, header::COMPLEX_ALIGNED);
+        let f128 = cat == header::CAT_FLOAT && count == 4;
+        let over = [width, width + 1, 15, 16, 17, 255]
+            .into_iter()
+            .filter(|&pad| pad >= width);
+        for pad in (0..width).chain(over) {
+            let whole = [
+                &[
+                    header::COMPLEX,
+                    class,
+                    header::ALIGNED_ARRAY,
+                    header::array_of(cat, count),
+                    2 << 2,
+                    pad as u8,
+                ][..],
+                &vec![0xaa; pad],
+                &vec![0; 2 * width],
+            ]
+            .concat();
+            let label = format!("{class:#04x}, padding {pad}");
+            if pad < width {
+                accepted += 1;
+                validate_beve(&whole).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                // A 128-bit float is well formed and has no Rust type.
+                if !f128 {
+                    for (walk, r, _) in every_walk(&whole) {
+                        assert_eq!(r, Ok(()), "{walk}, {label}");
+                    }
+                }
+                continue;
+            }
+            for doc in [&whole[..], &whole[..6]] {
+                refused += 1;
+                refused_everywhere(&label, doc, ErrorCode::InvalidPadding, 6);
+                let streamed = structio::from_beve_reader_array::<Complex<f64>, _>(doc);
+                let e = streamed.unwrap_err();
+                let e = e.as_parse().expect("a slice has no I/O to fail");
+                assert_eq!((e.code, e.index), (ErrorCode::InvalidPadding, 6), "{label}");
+            }
+        }
+    }
+    // Every length below each of the fifteen component widths, and each of
+    // the refused lengths whole and cut short.
+    assert_eq!(accepted, 2 + 2 + 4 + 8 + 16 + 2 * (1 + 2 + 4 + 8 + 16));
+    assert!(refused > 2 * 15);
+}
+
+#[test]
+fn the_inner_array_has_to_be_the_one_the_specification_allows() {
+    // The value inside must be an aligned typed array, since an unaligned one
+    // would say what the plain run already says. Its element type must be the
+    // class's own, and its count must be a whole number of pairs. Each is
+    // refused just past the byte that breaks it, before anything after that
+    // byte is trusted: the element type before the count, the count before
+    // the padding.
+    let good = aligned_f64(&[1.0, 2.0, 3.0, 4.0], 2, 0);
+    assert_eq!(good, SPEC_EXAMPLE);
+    let with = |at: usize, byte: u8| {
+        let mut doc = good.clone();
+        doc[at] = byte;
+        doc
+    };
+    let f64s = header::array_of(header::CAT_FLOAT, 3);
+    let cases = [
+        // The marker.
+        ("an unaligned typed array", with(2, f64s), 3),
+        ("a boolean array", with(2, header::BOOL_ARRAY), 3),
+        ("a string array", with(2, header::STRING_ARRAY), 3),
+        ("a generic array", with(2, header::GENERIC_ARRAY), 3),
+        ("a number", with(2, header::number(header::CAT_FLOAT, 3)), 3),
+        ("a complex array", with(2, header::COMPLEX), 3),
+        // The element type.
+        ("f32", with(3, header::array_of(header::CAT_FLOAT, 2)), 4),
+        ("f128", with(3, header::array_of(header::CAT_FLOAT, 4)), 4),
+        ("i64", with(3, header::array_of(header::CAT_SIGNED, 3)), 4),
+        ("u64", with(3, header::array_of(header::CAT_UNSIGNED, 3)), 4),
+        ("booleans", with(3, header::BOOL_ARRAY), 4),
+        ("the marker again", with(3, header::ALIGNED_ARRAY), 4),
+        (
+            "an undefined width",
+            with(3, header::array_of(header::CAT_FLOAT, 5)),
+            4,
+        ),
+        (
+            "an f64 number",
+            with(3, header::number(header::CAT_FLOAT, 3)),
+            4,
+        ),
+        // The count.
+        ("three components", with(4, 3 << 2), 5),
+        ("one component", with(4, 1 << 2), 5),
+    ];
+    for (name, doc, at) in cases {
+        refused_everywhere(name, &doc, ErrorCode::InvalidHeader, at);
+    }
+
+    // An odd count wide enough to take two bytes is refused past both.
+    let mut odd = vec![header::COMPLEX, 0x62, header::ALIGNED_ARRAY, f64s];
+    odd.extend_from_slice(&[((101 << 2) as u8) | 1, 101 >> 6]);
+    odd.push(0);
+    odd.extend(std::iter::repeat_n(0, 101 * 8));
+    refused_everywhere("101 components", &odd, ErrorCode::InvalidHeader, 6);
+}
+
+#[test]
+fn only_three_forms_of_the_class_are_defined() {
+    // Sub-types 3 through 7 have no meaning, and the extent of the value
+    // depends on which form it is, so each is refused on the class byte
+    // itself, whatever follows. So is a component type with no width.
+    let body = &SPEC_EXAMPLE[2..];
+    for form in 3..=7 {
+        let class = header::complex_class(header::CAT_FLOAT, 3, form);
+        let doc = [&[header::COMPLEX, class][..], body].concat();
+        refused_everywhere(&format!("form {form}"), &doc, ErrorCode::InvalidHeader, 2);
+    }
+    for (cat, count) in [
+        (header::CAT_FLOAT, 5),
+        (header::CAT_FLOAT, 7),
+        (header::CAT_SIGNED, 5),
+        (header::CAT_UNSIGNED, 6),
+        (header::CAT_OTHER, 3),
+    ] {
+        let class = header::complex_class(cat, count, header::COMPLEX_ALIGNED);
+        let doc = [&[header::COMPLEX, class][..], body].concat();
+        refused_everywhere(&format!("{class:#04x}"), &doc, ErrorCode::InvalidHeader, 2);
+    }
+}
+
+#[test]
+fn an_aligned_run_cut_short_anywhere_is_refused_by_every_walk() {
+    // Streamed at the stored type, the only one that call takes.
+    type Streamed = fn(&[u8]) -> Result<(), structio::StreamError>;
+    let f64s: Streamed = |b| structio::from_beve_reader_array::<Complex<f64>, _>(b).map(drop);
+    let f32s: Streamed = |b| structio::from_beve_reader_array::<Complex<f32>, _>(b).map(drop);
+    let narrow = vec![Complex::new(1.5f32, -2.5), Complex::new(0.25, 8.0)];
+    for (doc, streamed) in [
+        (SPEC_EXAMPLE.to_vec(), f64s),
+        (to_beve_aligned(&narrow), f32s),
+        (aligned_f64(&[1.0, 2.0], 7, 0xee), f64s),
+    ] {
+        streamed(&doc).unwrap();
+        for cut in 1..doc.len() {
+            let short = &doc[..cut];
+            for (walk, r, _) in every_walk(short) {
+                assert_eq!(
+                    r.map_err(|(code, _)| code),
+                    Err(ErrorCode::UnexpectedEnd),
+                    "{walk}, cut at {cut} of {doc:02x?}"
+                );
+            }
+            let code = streamed(short).unwrap_err().as_parse().map(|e| e.code);
+            assert_eq!(
+                code,
+                Some(ErrorCode::UnexpectedEnd),
+                "streamed, cut at {cut}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_aligned_run_costs_no_nesting_level_either() {
+    // The aligned form's inner array is part of its preamble, not a value the
+    // run holds, so the run is charged what the plain one is: nothing. Read
+    // stored narrower than the target, which drives it element by element
+    // through `read_seq`, and at the target's own width, which is the bulk
+    // copy.
+    let narrow = to_beve_aligned(&vec![Complex::new(1.0f32, 2.0), Complex::new(3.0, 4.0)]);
+    let exact = to_beve_aligned(&vec![Complex::new(1.0f64, 2.0), Complex::new(3.0, 4.0)]);
+    for inner in [narrow, exact] {
+        assert_eq!(inner[1] & 0b111, header::COMPLEX_ALIGNED);
+        for wrappers in [
+            MAX_DEPTH as usize - 1,
+            MAX_DEPTH as usize,
+            MAX_DEPTH as usize + 1,
+        ] {
+            let doc = wrap(wrappers, &inner);
+            let fits = wrappers <= MAX_DEPTH as usize;
+            let walks = [
+                ("validate", validate_beve(&doc).is_ok()),
+                (
+                    "read",
+                    read_nested::<Vec<Complex<f64>>>(&doc, wrappers).is_ok(),
+                ),
+                ("skip", from_beve::<Any>(&doc).is_ok()),
+                ("Value", from_beve::<Value>(&doc).is_ok()),
+                ("transcode", beve_to_json(&doc).is_ok()),
+                ("framed", drain(beve::Documents::values(&doc[..])) == Ok(1)),
+            ];
+            for (walk, ok) in walks {
+                assert_eq!(ok, fits, "{walk}, {wrappers} wrappers");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_aligned_run_streams_element_by_element() {
+    let run: Vec<Complex<f64>> = (0..64)
+        .map(|i| Complex::new(i as f64, -(i as f64)))
+        .collect();
+    let bytes = to_beve_aligned(&run);
+    assert_eq!(bytes[1] & 0b111, header::COMPLEX_ALIGNED);
+
+    let mut docs = beve::Documents::array(&bytes[..]).read_size(16);
+    let pulled: Vec<Complex<f64>> = docs.iter::<Complex<f64>>().map(Result::unwrap).collect();
+    assert_eq!(pulled, run);
+
+    // Whole, however the bytes arrive.
+    let mut feed = beve::Feed::values();
+    let mut got = Vec::new();
+    for &b in &bytes {
+        feed.push(&[b]);
+        while let Some(v) = feed.next_value::<Vec<Complex<f64>>>() {
+            got.push(v.unwrap());
+        }
+    }
+    feed.end();
+    assert_eq!(got, vec![run]);
+}
+
+#[test]
+fn a_pointer_steps_over_an_aligned_run_and_names_nothing_inside_one() {
+    #[derive(Default, Debug, PartialEq)]
+    struct Capture {
+        iq: Vec<Complex<f64>>,
+        gain: f64,
+    }
+    structio::object!(Capture { iq, gain });
+
+    let capture = Capture {
+        iq: vec![Complex::new(1.0, -1.0), Complex::new(0.5, 0.25)],
+        gain: 3.5,
+    };
+    let doc = to_beve_aligned(&capture);
+    assert_eq!(from_beve::<Capture>(&doc).unwrap(), capture);
+    assert_eq!(from_beve_at::<f64>(&doc, "/gain").unwrap(), 3.5);
+    assert_eq!(
+        from_beve_at::<Vec<Complex<f64>>>(&doc, "/iq").unwrap(),
+        capture.iq
+    );
+    // An extension is not addressable, in this form as in the other.
+    assert_eq!(
+        from_beve_at::<Complex<f64>>(&doc, "/iq/1")
+            .unwrap_err()
+            .code,
+        ErrorCode::NoSuchValue
+    );
 }
 
 // ---------------------------------------------------------------------------

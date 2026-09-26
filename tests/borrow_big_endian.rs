@@ -14,7 +14,7 @@ use std::borrow::Cow;
 
 use structio::beve::header;
 use structio::{
-    ErrorCode, beve_slice_ref, from_beve, read_beve_array_into, to_beve, to_beve_aligned,
+    Complex, ErrorCode, beve_slice_ref, from_beve, read_beve_array_into, to_beve, to_beve_aligned,
     validate_beve,
 };
 
@@ -43,6 +43,38 @@ fn a_cow_field_takes_the_owned_half() {
     let read: Cow<'_, [f64]> = from_beve(&doc).unwrap();
     assert!(matches!(read, Cow::Owned(_)), "borrowed on big-endian");
     assert_eq!(read.as_ref(), samples.as_slice());
+}
+
+#[test]
+fn an_aligned_complex_run_is_written_little_endian_and_read_by_copying() {
+    // The specification's own example, which is little-endian whatever the
+    // host: the components go out byte-swapped, and each comes back swapped
+    // on its own rather than the pair as a whole.
+    let signal = vec![Complex::new(1.0f64, 2.0), Complex::new(3.0, 4.0)];
+    let doc = to_beve_aligned(&signal);
+    let mut want = vec![0x1e, 0x62, 0x5c, 0x64, 0x10, 0x02, 0, 0];
+    for c in [1.0f64, 2.0, 3.0, 4.0] {
+        want.extend_from_slice(&c.to_le_bytes());
+    }
+    assert_eq!(doc, want);
+
+    assert!(
+        beve_slice_ref::<Complex<f64>>(&doc).is_none(),
+        "borrowed a little-endian block on a big-endian target"
+    );
+    let read: Cow<'_, [Complex<f64>]> = from_beve(&doc).unwrap();
+    assert!(matches!(read, Cow::Owned(_)), "borrowed on big-endian");
+    assert_eq!(read.as_ref(), signal.as_slice());
+    let streamed: Vec<Complex<f64>> = structio::from_beve_reader_array(&doc[..]).unwrap();
+    assert_eq!(streamed, signal);
+
+    // And at a width whose pair is the size of one `f64`, where swapping the
+    // element rather than the component would transpose the two.
+    let narrow = vec![Complex::new(1.5f32, -2.5), Complex::new(0.25, 8.0)];
+    let doc = to_beve_aligned(&narrow);
+    assert_eq!(from_beve::<Vec<Complex<f32>>>(&doc).unwrap(), narrow);
+    let streamed: Vec<Complex<f32>> = structio::from_beve_reader_array(&doc[..]).unwrap();
+    assert_eq!(streamed, narrow);
 }
 
 #[test]
@@ -86,6 +118,52 @@ fn a_padding_length_is_held_to_the_element_width_on_the_copying_paths_too() {
                 Err((ErrorCode::InvalidPadding, 4)),
                 "{name}, padding {pad}"
             );
+        }
+    }
+}
+
+#[test]
+fn a_complex_run_s_padding_is_held_to_a_component_on_the_copying_paths_too() {
+    // The same for the aligned complex run, whose element for this purpose is
+    // one component: an `f32` pair may be padded by three bytes and no more.
+    let signal = [Complex::new(1.5f32, -2.25), Complex::new(0.5, 4.0)];
+    let class = header::complex_class(header::CAT_FLOAT, 2, header::COMPLEX_ALIGNED);
+    let f32s = header::header(header::TY_TYPED_ARRAY, header::CAT_FLOAT, 2);
+    for pad in [0usize, 3, 4, 7, 255] {
+        let mut doc = vec![header::COMPLEX, class, header::ALIGNED_ARRAY, f32s];
+        doc.extend_from_slice(&[4 << 2, pad as u8]);
+        doc.extend(std::iter::repeat_n(0xAA, pad));
+        for z in signal {
+            doc.extend_from_slice(&z.re.to_le_bytes());
+            doc.extend_from_slice(&z.im.to_le_bytes());
+        }
+        let mut streamed = Vec::<Complex<f32>>::new();
+        let reads = [
+            ("validate", validate_beve(&doc)),
+            ("Vec", from_beve::<Vec<Complex<f32>>>(&doc).map(drop)),
+            ("Cow", from_beve::<Cow<'_, [Complex<f32>]>>(&doc).map(drop)),
+            (
+                "read_beve_array_into",
+                read_beve_array_into(&mut streamed, &doc[..])
+                    .map_err(|e| *e.as_parse().expect("a slice has no I/O to fail")),
+            ),
+        ];
+        assert!(
+            beve_slice_ref::<Complex<f32>>(&doc).is_none(),
+            "padding {pad}"
+        );
+        if pad < 4 {
+            for (name, r) in reads {
+                r.unwrap_or_else(|e| panic!("{name}, padding {pad}: {e:?}"));
+            }
+            assert_eq!(from_beve::<Vec<Complex<f32>>>(&doc).unwrap(), signal);
+            assert_eq!(streamed, signal);
+            continue;
+        }
+        for (name, r) in reads {
+            let got = r.map_err(|e| (e.code, e.index));
+            let want = Err((ErrorCode::InvalidPadding, 6));
+            assert_eq!(got, want, "{name}, padding {pad}");
         }
     }
 }

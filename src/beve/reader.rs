@@ -534,10 +534,47 @@ impl<'de, O: Options> Reader<'de, O> {
         // unaligned array of the same element type.
         let width = fixed_width(inner)?;
         let n = self.count()?;
+        self.skip_padding(width)?;
+        Ok((inner, n))
+    }
+
+    /// Step over an aligned array's `PADDING_LENGTH | PADDING`, for elements
+    /// `width` bytes wide.
+    ///
+    /// The length is held below the width by [`aligned_padding`], and refused
+    /// just past the length byte, before the padding it announces is looked
+    /// for. The contents are unspecified, so they are not looked at.
+    fn skip_padding(&mut self, width: usize) -> PResult<()> {
         let pad = self.take(1)?[0];
         aligned_padding(pad, width)?;
-        self.drop_bytes(usize::from(pad))?;
-        Ok((inner, n))
+        self.drop_bytes(usize::from(pad))
+    }
+
+    /// Consume the aligned typed array an [aligned complex
+    /// array](header::COMPLEX_ALIGNED) holds, leaving the cursor on the
+    /// payload, and report how many pairs it holds.
+    ///
+    /// The array is a whole value of its own, `HEADER | NUMERIC_HEADER | SIZE |
+    /// PADDING_LENGTH | PADDING | DATA`, and the specification allows it
+    /// exactly one shape: the aligned marker, then the class's own element
+    /// type, then an even count of components, padded by less than a
+    /// component's `width`. Anything else is refused on the byte that breaks
+    /// it, before anything past that byte is read, so a mismatched element
+    /// type is found before a count is trusted. The class's width has been
+    /// checked by the caller, which passes it in.
+    fn aligned_pairs(&mut self, class: u8, width: usize) -> PResult<usize> {
+        if self.head()? != header::ALIGNED_ARRAY {
+            return Err(ErrorCode::InvalidHeader);
+        }
+        if self.head()? != header::complex_components(class) {
+            return Err(ErrorCode::InvalidHeader);
+        }
+        let components = self.count()?;
+        if components % 2 != 0 {
+            return Err(ErrorCode::InvalidHeader);
+        }
+        self.skip_padding(width)?;
+        Ok(components / 2)
     }
 
     /// Confirm `n` more bytes are in the buffer, without consuming them.
@@ -613,27 +650,30 @@ impl<'de, O: Options> Reader<'de, O> {
         }
     }
 
-    /// Consume a complex value's class header and, for the run form, its
-    /// count, leaving the cursor on the payload.
+    /// Consume a complex value's class header and, for the two run forms,
+    /// everything up to the payload, leaving the cursor on it.
     ///
     /// [`header::COMPLEX`] is already consumed. Reports the class header, the
     /// width of one component, and how many pairs follow, `None` being the
-    /// lone form.
+    /// lone form. The aligned run is a run like the other once its preamble is
+    /// consumed, the same interleaved pairs, so nothing past this has to know
+    /// which of the two it was.
     ///
-    /// Shared for the same reason [`Self::typed_head`] is: the two forms differ
-    /// by a size in front of the payload, so a walk that decided this for
+    /// Shared for the same reason [`Self::typed_head`] is: the forms differ by
+    /// what stands in front of the payload, so a walk that decided this for
     /// itself would eventually step over a different extent than the others.
     pub(crate) fn complex_head(&mut self) -> PResult<(u8, usize, Option<usize>)> {
         let class = self.head()?;
         let width =
             byte_width(header::sub(class), header::count(class)).ok_or(ErrorCode::InvalidHeader)?;
         // The low three bits are three bits wide only so the class and byte
-        // count land where a number header puts them. Two values are defined
-        // and the other six carry no meaning; guessing would make the extent
+        // count land where a number header puts them. Three values are defined
+        // and the other five carry no meaning; guessing would make the extent
         // of the value depend on them, so they are refused.
         let pairs = match class & 0b111 {
             header::COMPLEX_ONE => None,
             header::COMPLEX_MANY => Some(self.count()?),
+            header::COMPLEX_ALIGNED => Some(self.aligned_pairs(class, width)?),
             _ => return Err(ErrorCode::InvalidHeader),
         };
         Ok((class, width, pairs))
@@ -1592,11 +1632,11 @@ impl<'de, O: Options> Reader<'de, O> {
     /// of same-width elements, reporting the header its elements imply and how
     /// many of them there are.
     ///
-    /// Three forms answer to that description and they differ only in their
+    /// Four forms answer to that description and they differ only in their
     /// preambles: a typed numeric array, the aligned form of one, and a run of
-    /// complex numbers. Deciding between them once is what keeps the two
-    /// callers below from each having to know all three, and from coming to
-    /// disagree about which of them is worth taking whole.
+    /// complex numbers in either of its two forms. Deciding between them once
+    /// is what keeps the two callers below from each having to know all four,
+    /// and from coming to disagree about which of them is worth taking whole.
     ///
     /// `None` for anything else, for a preamble that does not parse, and for a
     /// typed array with no nesting level left to charge it: what is wrong with
@@ -1620,7 +1660,7 @@ impl<'de, O: Options> Reader<'de, O> {
         self.pos += 1;
         if h == header::COMPLEX {
             // The lone form has no count and is one value rather than a run,
-            // so only the run form is a block.
+            // so only the two run forms are blocks.
             let (class, _, pairs) = self.complex_head().ok()?;
             return Some((header::complex_element(class), pairs?));
         }
@@ -1981,9 +2021,12 @@ impl<'de, O: Options> Reader<'de, O> {
                     r.step::<UTF8>()
                 })
             }
-            // A class header, a count in the run form, and then pairs of
-            // components. Charged no level: it holds numbers and nothing else,
-            // so nothing here or in `read_seq` ever recurses through one.
+            // A class header, a count or an aligned array's preamble in the
+            // two run forms, and then pairs of components. Charged no level:
+            // it holds numbers and nothing else, so nothing here or in
+            // `read_seq` ever recurses through one. The aligned form's inner
+            // array is part of its preamble rather than a value of its own,
+            // so it is charged nothing either.
             header::EXT_COMPLEX => {
                 let (_, width, pairs) = self.complex_head()?;
                 self.drop_bytes(complex_payload(width, pairs)?)
@@ -2394,8 +2437,8 @@ pub(crate) fn payload_len(h: u8, n: usize) -> PResult<usize> {
 /// Bytes of payload behind a complex value's preamble, as
 /// [`Reader::complex_head`] reported it.
 ///
-/// One pair for the lone form, `n` for the run form, and two components in
-/// either. `2 * width` cannot overflow: no class header describes a component
+/// One pair for the lone form, `n` for either run form, and two components in
+/// each. `2 * width` cannot overflow: no class header describes a component
 /// wider than sixteen bytes.
 pub(crate) fn complex_payload(width: usize, pairs: Option<usize>) -> PResult<usize> {
     pairs
